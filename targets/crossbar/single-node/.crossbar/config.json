@@ -1,0 +1,202 @@
+{
+    "version": 2,
+    "controller": {},
+    "workers": [
+        {
+            "type": "router",
+            "realms": [
+                {
+                    "name": "public",
+                    "roles": [
+                        {
+                            "name": "guest",
+                            "permissions": [
+                                {
+                                    "uri": "gladiators.",
+                                    "match": "prefix",
+                                    "allow": {
+                                        "call": true,
+                                        "register": true,
+                                        "publish": true,
+                                        "subscribe": true
+                                    },
+                                    "disclose": {
+                                        "caller": true,
+                                        "publisher": true
+                                    },
+                                    "cache": true
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "name": "application1",
+                    "roles": [
+                        {
+                            "name": "device",
+                            "permissions": [
+                                {
+                                    "uri": "gladiators.",
+                                    "match": "prefix",
+                                    "allow": {
+                                        "call": true,
+                                        "register": true,
+                                        "publish": true,
+                                        "subscribe": true
+                                    },
+                                    "disclose": {
+                                        "caller": true,
+                                        "publisher": true
+                                    },
+                                    "cache": true
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "name": "application2",
+                    "roles": [
+                        {
+                            "name": "device",
+                            "permissions": [
+                                {
+                                    "uri": "gladiators.",
+                                    "match": "prefix",
+                                    "allow": {
+                                        "call": true,
+                                        "register": true,
+                                        "publish": true,
+                                        "subscribe": true
+                                    },
+                                    "disclose": {
+                                        "caller": true,
+                                        "publisher": true
+                                    },
+                                    "cache": true
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+            "transports": [
+                {
+                    "type": "universal",
+                    "endpoint": {
+                        "type": "tcp",
+                        "port": 8080,
+                        "tls": {
+                            "key": "server.key",
+                            "certificate": "server.crt"
+                        }
+                    },
+                    "rawsocket": {
+                        "serializers": [
+                            "cbor"
+                        ],
+                        "auth": {
+                            "anonymous": {
+                                "type": "static",
+                                "role": "guest"
+                            },
+                            "cryptosign": {
+                                "type": "static",
+                                "principals": {
+                                    "client04": {
+                                        "realm": "application1",
+                                        "role": "device",
+                                        "authorized_keys": []
+                                    },
+                                    "client05": {
+                                        "realm": "application1",
+                                        "role": "device",
+                                        "authorized_keys": []
+                                    },
+                                    "client06": {
+                                        "realm": "application1",
+                                        "role": "device",
+                                        "authorized_keys": []
+                                    },
+                                    "client07": {
+                                        "realm": "application2",
+                                        "role": "device",
+                                        "authorized_keys": []
+                                    },
+                                    "client08": {
+                                        "realm": "application2",
+                                        "role": "device",
+                                        "authorized_keys": []
+                                    },
+                                    "client09": {
+                                        "realm": "application2",
+                                        "role": "device",
+                                        "authorized_keys": []
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "websocket": {
+                        "ws": {
+                            "type": "websocket",
+                            "serializers": [
+                                "cbor"
+                            ],
+                            "auth": {
+                                "anonymous": {
+                                    "type": "static",
+                                    "role": "guest"
+                                },
+                                "cryptosign": {
+                                    "type": "static",
+                                    "principals": {
+                                        "client04": {
+                                            "realm": "application1",
+                                            "role": "device",
+                                            "authorized_keys": []
+                                        },
+                                        "client05": {
+                                            "realm": "application1",
+                                            "role": "device",
+                                            "authorized_keys": []
+                                        },
+                                        "client06": {
+                                            "realm": "application1",
+                                            "role": "device",
+                                            "authorized_keys": []
+                                        },
+                                        "client07": {
+                                            "realm": "application2",
+                                            "role": "device",
+                                            "authorized_keys": []
+                                        },
+                                        "client08": {
+                                            "realm": "application2",
+                                            "role": "device",
+                                            "authorized_keys": []
+                                        },
+                                        "client09": {
+                                            "realm": "application2",
+                                            "role": "device",
+                                            "authorized_keys": []
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "web": {
+                        "paths": {
+                            "/": {
+                                "type": "static",
+                                "directory": "../web"
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+    ]
+}
