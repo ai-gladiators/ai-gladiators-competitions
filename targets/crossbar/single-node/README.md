@@ -48,6 +48,8 @@ A client:
    - the router reported the caller's own authid to the callee;
    - every tick it receives comes from its own realm.
 
+With `--duration` the client stops in two phases: it stops calling, waits for its call in flight, keeps answering `echo` for `--stop-grace` seconds (default 5) while its peers finish, and only then leaves.
+
 Every event becomes one JSON line in `--log`, with an fsync after each line: connect, join, refused join, call, publish, received tick, leave, disconnect, and a final summary. A record carries a timestamp, the operation, the peer, the latency in ms, `ok` or the error, and a `violation` field whenever a check fails. Call latency (for example the p99) and the error rate come straight out of these logs.
 
 Prove that every check fires on its own case:

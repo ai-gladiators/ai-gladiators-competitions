@@ -90,6 +90,12 @@ def parse_args(argv=None):
     p.add_argument(
         "--peer-wait", type=float, default=60.0, help="seconds to wait for every peer's echo before the workload starts"
     )
+    p.add_argument(
+        "--stop-grace",
+        type=float,
+        default=5.0,
+        help="after --duration: seconds to keep serving echo before leaving (peers may still be calling)",
+    )
     args = p.parse_args(argv)
     if not (args.generate_key or args.self_test):
         for k in ("name", "realm", "trust", "log"):
@@ -283,8 +289,14 @@ def main(argv=None):
         done = comp.start(loop)
         if args.duration is not None:
             await asyncio.sleep(args.duration)
+            # Two-phase stop: stop calling, finish the call in flight, then keep
+            # serving echo for the grace period, so peers that started later and
+            # are still calling get their answers. Only then leave.
             state["stop"] = True
-            await asyncio.sleep(1.0)
+            task = state.get("task")
+            if task is not None:
+                await asyncio.wait([task], timeout=args.stop_grace)
+            await asyncio.sleep(args.stop_grace)
             stopped = comp.stop()
             if stopped is not None:
                 await stopped
