@@ -69,6 +69,36 @@ def self_test():
     print("self-test OK: every check fires on its case")
 
 
+def stack(url):
+    """What this client actually runs on - measured, so every log says what was tested."""
+    import platform
+    import selectors
+    from importlib.metadata import PackageNotFoundError, version
+
+    def ver(dist):
+        try:
+            return version(dist)
+        except PackageNotFoundError:
+            return None
+
+    scheme = urlparse(url).scheme
+    loop = asyncio.new_event_loop()
+    loop_name = type(loop).__name__
+    loop.close()
+    return {
+        "python": f"{platform.python_implementation()} {platform.python_version()}",
+        "openssl": ssl.OPENSSL_VERSION,
+        "autobahn": ver("autobahn"),
+        "txaio": ver("txaio"),
+        "pynacl": ver("pynacl"),
+        "cbor2": ver("cbor2"),
+        "event_loop": f"asyncio {loop_name} / {selectors.DefaultSelector.__name__}",
+        "transport": {"wss": "WebSocket over TLS", "rss": "RawSocket over TLS"}.get(scheme, scheme),
+        "serializer": "cbor",
+        "os": platform.platform(),
+    }
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--self-test", action="store_true", help="prove the answer checks fire, then exit")
@@ -169,6 +199,7 @@ def main(argv=None):
         return 0
 
     log = Log(args.log, args.name, args.realm)
+    log.write("start", ok=True, stack=stack(args.url))
     rng = random.Random(f"{args.seed}:{args.name}")
     peers = [p for p in args.peers.split(",") if p]
 
@@ -269,7 +300,17 @@ def main(argv=None):
     async def joined(session, details):
         state["authid"] = details.authid
         state["joined"] = True
-        log.write("join", ok=True, authid=details.authid, authrole=details.authrole, authmethod=details.authmethod)
+        # measured on the live connection: the WebSocket extensions (e.g. permessage-deflate)
+        # the router and this client agreed on; None on RawSocket
+        ws_ext = getattr(getattr(session, "_transport", None), "websocket_extensions_in_use", None)
+        log.write(
+            "join",
+            ok=True,
+            authid=details.authid,
+            authrole=details.authrole,
+            authmethod=details.authmethod,
+            websocket_extensions=None if ws_ext is None else [str(e) for e in ws_ext],
+        )
         await session.register(echo, f"{PREFIX}{args.name}.echo", options=RegisterOptions(details_arg="details"))
         await session.subscribe(on_tick, TICK, options=SubscribeOptions(details_arg="details"))
         # the workload runs as its own task, so the join completes now

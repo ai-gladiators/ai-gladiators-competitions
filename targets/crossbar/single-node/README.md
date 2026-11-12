@@ -2,6 +2,42 @@
 
 One [Crossbar.io](https://crossbar.io) router, three realms, and nine [AutobahnPython](https://github.com/crossbario/autobahn-python) clients running a seeded workload. The router configuration and the client code are published here in full. Only the keys stay out of the repository.
 
+## The system under test
+
+Everything in the path of a WAMP call is part of the target: the protocol stack, the interpreter, the TLS library and the event loop. Each of them affects behaviour and performance, and each can carry a bug or an exploit.
+
+| layer | router | clients |
+|---|---|---|
+| machine | one KVM/QEMU virtual machine, Debian 13 | one KVM/QEMU virtual machine per client (nine), Debian 13 |
+| host | Debian 12 | the same host |
+| network | TCP between the virtual machines | |
+| interpreter | CPython 3.14 | CPython 3.14 |
+| software | Crossbar.io on Twisted, epoll reactor (`CROSSBAR_REACTOR=epoll`) | AutobahnPython on asyncio, `_UnixSelectorEventLoop` with `EpollSelector` |
+| TLS | pyOpenSSL over `cryptography`, which bundles **its own OpenSSL** | the CPython `ssl` module, with **the OpenSSL CPython was built with** |
+| WAMP transport | WebSocket over TLS, no WebSocket extensions (no compression); RawSocket over TLS is also offered | WebSocket over TLS |
+| serializer | CBOR | CBOR |
+| authentication | anonymous (`public`), WAMP-Cryptosign (`application1`, `application2`) | the same |
+
+**The two ends of a connection run different TLS stacks.** The router's TLS goes through the OpenSSL that `cryptography` bundles; the clients' TLS goes through the OpenSSL CPython was built with. Their versions differ.
+
+**Every run records what it actually ran on.**
+- Each client writes a `start` record into its log, holding the interpreter, the OpenSSL version, the library versions and the event loop.
+- Each `join` record holds the WebSocket extensions actually negotiated on the live connection; there must be none.
+- The smoke test prints the router's stack next to the clients' stack.
+
+The smoke test on 2026-11-13 measured:
+
+| | router | clients |
+|---|---|---|
+| interpreter | CPython 3.14.7 | CPython 3.14.7 |
+| TLS | OpenSSL 4.0.3 (`cryptography` 50.0.2, pyOpenSSL 26.4.0) | OpenSSL 3.5.8 |
+| WAMP | Crossbar.io 26.11.1.dev2, AutobahnPython 26.11.1, Twisted 26.10.0 | AutobahnPython 26.11.1, txaio 26.6.1 |
+| CBOR, Cryptosign | cbor2 6.2.1, PyNaCl 1.6.2 | cbor2 6.2.1, PyNaCl 1.6.2 |
+
+This measurement comes from the test machine. The deployed virtual machines record their own values, and a match result carries them.
+
+The smoke test's call latencies show that the target works. They are not a benchmark: measuring robust round-trip times, such as a p99, is a separate task, and so are faster variants of the target (for example PyPy).
+
 ## The router
 
 [`.crossbar/config.json`](.crossbar/config.json) defines one listening transport of type `universal`, on port 8080 over TLS. On every connection the router tells three protocols apart:
@@ -78,8 +114,8 @@ Use `--url rss://localhost:8080` for RawSocket. Without `--key` the client authe
 
 1. it copies the node directory to a temporary directory;
 2. it generates a throwaway TLS pair and throwaway client keys there;
-3. it starts the router and the nine clients for `DURATION` seconds (default 30);
-4. it requires every client log to show calls and ticks from its own realm, with no errors and no violations;
+3. it starts the router on the epoll reactor and the nine clients for `DURATION` seconds (default 120), and prints the stack of both ends;
+4. it requires every client log to show calls and ticks from its own realm, with no errors and no violations, and every WebSocket connection to have no extensions negotiated;
 5. it requires the router to refuse an unknown Cryptosign key (`wamp.error.not_authorized`) and an anonymous client in `application1` (`wamp.error.no_such_role`).
 
 ```console

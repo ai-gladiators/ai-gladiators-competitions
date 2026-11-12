@@ -5,13 +5,15 @@
 #   1. copy the node directory to a temporary directory;
 #   2. generate a throwaway TLS pair and six throwaway client keys, and write
 #      the public keys into that copy's config.json;
-#   3. start Crossbar.io and the nine clients for DURATION seconds;
+#   3. start Crossbar.io (epoll reactor) and the nine clients for DURATION
+#      seconds, and print what both ends actually run on (Python, OpenSSL,
+#      library versions, event loop);
 #   4. require every client log to show calls and ticks of its own realm, no
 #      errors and no violations; and require the router to refuse an unknown
 #      key and an anonymous client in an authenticated realm.
 #
 # Environment: PYTHON (with autobahn, see client/requirements.txt), CROSSBAR
-# (the crossbar executable), DURATION (default 30), PORT (default 8080),
+# (the crossbar executable), DURATION (default 120), PORT (default 8080),
 # KEEP=1 to keep the temporary directory.
 #
 # It starts a server on PORT. To keep it off the host's network, run it in its
@@ -23,7 +25,8 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${PYTHON:-python3}"
 CROSSBAR="${CROSSBAR:-crossbar}"
-DURATION="${DURATION:-30}"
+DURATION="${DURATION:-120}"
+export CROSSBAR_REACTOR=epoll
 PORT="${PORT:-8080}"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/gladiators-smoke.XXXXXX")"
@@ -31,11 +34,12 @@ node="${work}/node"
 cb_pid=""
 
 cleanup() {
+    local rc=$?
     if [ -n "${cb_pid}" ] && kill -0 "${cb_pid}" 2>/dev/null; then
         kill "${cb_pid}" 2>/dev/null || true
         wait "${cb_pid}" 2>/dev/null || true
     fi
-    if [ "${KEEP:-0}" = "1" ]; then
+    if [ "${KEEP:-0}" = "1" ] || [ "${rc}" -ne 0 ]; then
         echo "kept: ${work}"
     else
         rm -rf "${work}"
@@ -84,7 +88,8 @@ cfg_path.write_text(json.dumps(cfg, indent=4) + "\n")
 EOF
 
 echo "==> start Crossbar.io"
-"${CROSSBAR}" start --cbdir "${node}/.crossbar" > "${work}/crossbar.log" 2>&1 &
+# unbuffered, so the log file is current while the router runs (it is checked below)
+PYTHONUNBUFFERED=1 "${CROSSBAR}" start --cbdir "${node}/.crossbar" > "${work}/crossbar.log" 2>&1 &
 cb_pid=$!
 for _ in $(seq 1 60); do
     if curl -s --cacert "${node}/.crossbar/server.crt" "https://localhost:${PORT}/" > "${work}/index.html" 2>/dev/null; then
@@ -103,6 +108,35 @@ if ! grep -q "AI Gladiators" "${work}/index.html"; then
     exit 1
 fi
 echo "    web page served over TLS"
+# the router worker's log line can trail its first answer: give it a moment
+for _ in $(seq 1 20); do
+    grep -q "Running as PID [0-9]* on [A-Za-z]*-EPollReactor" "${work}/crossbar.log" && break
+    sleep 0.5
+done
+if ! grep -q "Running as PID [0-9]* on [A-Za-z]*-EPollReactor" "${work}/crossbar.log"; then
+    echo "FAIL: the router is not running on the epoll reactor" >&2
+    exit 1
+fi
+
+echo "==> router stack"
+grep -o "Running as PID [0-9]* on [A-Za-z]*-[A-Za-z]*Reactor" "${work}/crossbar.log" | sort -u | sed 's/^/    /'
+# the interpreter Crossbar.io runs on is the one in its launcher's shebang
+cb_python="$(head -n 1 "$(command -v "${CROSSBAR}")" | sed 's/^#!//')"
+"${cb_python}" -I - <<'PYEOF'
+import platform, ssl
+from importlib.metadata import version, PackageNotFoundError
+def ver(d):
+    try:
+        return version(d)
+    except PackageNotFoundError:
+        return None
+from cryptography.hazmat.backends.openssl import backend
+print(f"    python        {platform.python_implementation()} {platform.python_version()}")
+print(f"    TLS           Twisted via pyOpenSSL {ver('pyopenssl')} and cryptography {ver('cryptography')}: {backend.openssl_version_text()}")
+print(f"    ssl module    {ssl.OPENSSL_VERSION} (not used for the router's TLS)")
+print(f"    crossbar      {ver('crossbar')}, autobahn {ver('autobahn')}, twisted {ver('twisted')}, txaio {ver('txaio')}, cbor2 {ver('cbor2')}, pynacl {ver('pynacl')}")
+print(f"    os            {platform.platform()}")
+PYEOF
 
 realm_of() {
     case "$1" in
@@ -119,7 +153,7 @@ peers_of() {
     esac
 }
 
-echo "==> nine clients for ${DURATION} s"
+echo "==> nine clients for ${DURATION} s (+ stop grace)"
 pids=()
 n=0
 for c in client01 client02 client03 client04 client05 client06 client07 client08 client09; do
@@ -161,6 +195,11 @@ fail = []
 def records(name):
     p = logs / f"{name}.jsonl"
     return [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
+start = next((r for r in records("client02") if r["op"] == "start"), None)
+if start:
+    print("    client stack (client02):")
+    for k, v in start["stack"].items():
+        print(f"      {k:22} {v}")
 for i in range(1, 10):
     name = f"client{i:02d}"
     recs = records(name)
@@ -170,9 +209,14 @@ for i in range(1, 10):
     bad = [r for r in recs if r.get("error") or r.get("violation")]
     lat = sorted(r["latency_ms"] for r in calls if r.get("ok"))
     p99 = lat[int(0.99 * (len(lat) - 1))] if lat else None
-    print(f"    {name} {recs[0]['realm'] if recs else '?':13} joins={len(joins)} calls={len(calls)} "
+    wsx = joins[0].get("websocket_extensions") if joins else None
+    via = "RawSocket" if joins and wsx is None else f"WebSocket ext={wsx}"
+    print(f"    {name} {recs[0]['realm'] if recs else '?':13} {via:20} joins={len(joins)} calls={len(calls)} "
           f"events={len(events)} bad={len(bad)} p99_ms={p99}")
     if not joins: fail.append(f"{name}: never joined")
+    for j in joins:
+        if j.get("websocket_extensions"):  # None on RawSocket, [] on WebSocket without extensions
+            fail.append(f"{name}: WebSocket extensions negotiated: {j['websocket_extensions']}")
     if not calls: fail.append(f"{name}: no calls")
     if not events: fail.append(f"{name}: no ticks received")
     for r in bad[:3]: fail.append(f"{name}: {r}")
