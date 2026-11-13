@@ -31,6 +31,8 @@ from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.types import PublishOptions, RegisterOptions, SubscribeOptions
 
 PREFIX = "gladiators."
+# While waiting for its peers, a client logs who is still missing this often (seconds).
+PEER_WAIT_REPORT_S = 30.0
 TICK = PREFIX + "tick"
 
 
@@ -118,7 +120,10 @@ def parse_args(argv=None):
     p.add_argument("--log", help="the JSON Lines log to append to")
     p.add_argument("--duration", type=float, default=None, help="stop after this many seconds (default: run forever)")
     p.add_argument(
-        "--peer-wait", type=float, default=60.0, help="seconds to wait for every peer's echo before the workload starts"
+        "--peer-wait",
+        type=float,
+        default=0.0,
+        help="seconds to wait for every peer's echo before the workload starts; 0 (default): until all answer",
     )
     p.add_argument(
         "--stop-grace",
@@ -227,9 +232,22 @@ def main(argv=None):
         )
 
     async def wait_for_peers(session):
-        deadline = time.monotonic() + args.peer_wait
+        """The barrier: wait until every peer's echo answers, so no call of the workload
+        can fail because a peer has not started yet - a start-up artefact, not a fault
+        of the router. No deadline by default (a deployment may start its clients
+        minutes apart); a peer that never comes shows as `peer_wait` records, not as
+        failed calls. With --peer-wait > 0 it gives up after that long, as before.
+        Returns (ready, missing), or None when the client stops or loses its session
+        while waiting."""
+        t0 = time.monotonic()
+        deadline = t0 + args.peer_wait if args.peer_wait > 0 else None
+        next_report = t0 + PEER_WAIT_REPORT_S
         pending = set(peers)
-        while pending and time.monotonic() < deadline:
+        while pending:
+            if state["stop"] or not session.is_attached():
+                return None
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             for peer in sorted(pending):
                 try:
                     await session.call(f"{PREFIX}{peer}.echo", b"")
@@ -238,9 +256,14 @@ def main(argv=None):
                 except ApplicationError:
                     pass
             if pending:
+                now = time.monotonic()
+                if now >= next_report:
+                    log.write("peer_wait", ok=True, missing=sorted(pending), waited_s=round(now - t0, 1))
+                    next_report = now + PEER_WAIT_REPORT_S
                 await asyncio.sleep(0.5)
         for peer in sorted(pending):
             log.write("peer_ready", peer=peer, ok=False, error="peer not reachable before the workload started")
+        return sorted(set(peers) - pending), sorted(pending)
 
     async def call_once(session, peer):
         payload = rng.randbytes(rng.randint(16, 1024))
@@ -317,7 +340,13 @@ def main(argv=None):
         state["task"] = asyncio.ensure_future(workload(session))
 
     async def workload(session):
-        await wait_for_peers(session)
+        barrier = await wait_for_peers(session)
+        if barrier is None:
+            return
+        ready, missing = barrier
+        # The client's statement that its realm is complete (or, with --peer-wait, that
+        # it gave up): a match's measurement window starts at the latest of these.
+        log.write("workload_start", ok=not missing, peers=ready, missing=missing)
         while not state["stop"] and session.is_attached():
             await asyncio.sleep(rng.expovariate(args.rate))
             if peers:

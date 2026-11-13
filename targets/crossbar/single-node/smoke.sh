@@ -165,7 +165,7 @@ for c in client01 client02 client03 client04 client05 client06 client07 client08
     "${PYTHON}" "${here}/client/workload.py" --name "${c}" --realm "$(realm_of "${c}")" \
         --url "${url}" --trust "${node}/.crossbar/server.crt" "${keyarg[@]}" \
         --peers "$(peers_of "${c}")" --seed smoke --log "${work}/logs/${c}.jsonl" \
-        --duration "${DURATION}" > "${work}/logs/${c}.out" 2>&1 &
+        --duration "${DURATION}" --peer-wait 60 > "${work}/logs/${c}.out" 2>&1 &
     pids+=($!)
 done
 
@@ -217,6 +217,9 @@ for i in range(1, 10):
     for j in joins:
         if j.get("websocket_extensions"):  # None on RawSocket, [] on WebSocket without extensions
             fail.append(f"{name}: WebSocket extensions negotiated: {j['websocket_extensions']}")
+    starts = [r for r in recs if r["op"] == "workload_start"]
+    if len(starts) != 1 or starts[0].get("missing"):
+        fail.append(f"{name}: expected one workload_start with every peer ready, got {starts}")
     if not calls: fail.append(f"{name}: no calls")
     if not events: fail.append(f"{name}: no ticks received")
     for r in bad[:3]: fail.append(f"{name}: {r}")
