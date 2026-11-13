@@ -129,7 +129,9 @@ When its barrier is passed, a client logs `workload_start`. **A match's measurem
 PYTHON=/path/to/venv/bin/python CROSSBAR=/path/to/venv/bin/crossbar ./smoke.sh
 ```
 
-It listens on port 8080 (`PORT` changes that). To keep it off the host's network, run it in its own network namespace:
+`PYTHON` must have the client's requirements installed ([`client/requirements.txt`](client/requirements.txt)), and `CROSSBAR` must be the `crossbar` executable. The defaults are `python3` and `crossbar` on the `PATH`. The test checks both before it starts, and stops with a message naming the variable.
+
+It listens on port 8080 (`PORT` changes that). When that port is already taken, the test refuses to start and names the port. To keep it off the host's network, run it in its own network namespace:
 
 ```console
 unshare -rn --pid --fork --mount-proc ./smoke.sh

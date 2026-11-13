@@ -18,7 +18,8 @@
 #
 # It starts a server on PORT. To keep it off the host's network, run it in its
 # own network namespace, e.g. `unshare -rn --pid --fork --mount-proc ./smoke.sh`
-# (loopback is brought up below when it is down).
+# (loopback is brought up below when it is down). It refuses to start when
+# PORT is taken, or when PYTHON or CROSSBAR cannot run it.
 
 set -euo pipefail
 
@@ -29,8 +30,8 @@ DURATION="${DURATION:-120}"
 export CROSSBAR_REACTOR=epoll
 PORT="${PORT:-8080}"
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/gladiators-smoke.XXXXXX")"
-node="${work}/node"
+work=""
+node=""
 cb_pid=""
 
 cleanup() {
@@ -38,6 +39,9 @@ cleanup() {
     if [ -n "${cb_pid}" ] && kill -0 "${cb_pid}" 2>/dev/null; then
         kill "${cb_pid}" 2>/dev/null || true
         wait "${cb_pid}" 2>/dev/null || true
+    fi
+    if [ -z "${work}" ]; then
+        return
     fi
     if [ "${KEEP:-0}" = "1" ] || [ "${rc}" -ne 0 ]; then
         echo "kept: ${work}"
@@ -51,6 +55,45 @@ trap cleanup EXIT
 if command -v ip >/dev/null 2>&1 && ! ip -o link show lo | grep -q "UP"; then
     ip link set lo up
 fi
+
+# Fail at once, in plain words, when the environment cannot run the test.
+if ! command -v "${PYTHON}" >/dev/null 2>&1; then
+    echo "FAIL: PYTHON=${PYTHON} is not an executable; set PYTHON to the python of a venv with client/requirements.txt installed (see README)" >&2
+    exit 1
+fi
+missing="$("${PYTHON}" -c '
+import importlib.util
+print(" ".join(m for m in ("autobahn", "cbor2", "nacl") if importlib.util.find_spec(m) is None))
+' 2>/dev/null)" || missing="(python failed to run)"
+if [ -n "${missing}" ]; then
+    echo "FAIL: PYTHON=${PYTHON} cannot import: ${missing}; set PYTHON to the python of a venv with client/requirements.txt installed (see README)" >&2
+    exit 1
+fi
+if ! command -v "${CROSSBAR}" >/dev/null 2>&1; then
+    echo "FAIL: CROSSBAR=${CROSSBAR} is not an executable; set CROSSBAR to the crossbar of a venv with Crossbar.io installed (see README)" >&2
+    exit 1
+fi
+# The router listens on all IPv4 interfaces at PORT. If that port is taken, it
+# cannot start, and the readiness probe below would talk to the other listener.
+if ! "${PYTHON}" -I -c '
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(("0.0.0.0", int(sys.argv[1])))
+    s.listen(1)
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+' "${PORT}"; then
+    echo "FAIL: port ${PORT} is already taken on this machine; set PORT to a free port, or run in a network namespace (see README)" >&2
+    exit 1
+fi
+
+# the temporary directory exists only once the checks above have passed
+work="$(mktemp -d "${TMPDIR:-/tmp}/gladiators-smoke.XXXXXX")"
+node="${work}/node"
 
 echo "==> client self-test"
 "${PYTHON}" "${here}/client/workload.py" --self-test
@@ -92,7 +135,8 @@ echo "==> start Crossbar.io"
 PYTHONUNBUFFERED=1 "${CROSSBAR}" start --cbdir "${node}/.crossbar" > "${work}/crossbar.log" 2>&1 &
 cb_pid=$!
 for _ in $(seq 1 60); do
-    if curl -s --cacert "${node}/.crossbar/server.crt" "https://localhost:${PORT}/" > "${work}/index.html" 2>/dev/null; then
+    # the router listens on IPv4 only: never let "localhost" reach a listener on ::1
+    if curl -s --max-time 5 --resolve "localhost:${PORT}:127.0.0.1" --cacert "${node}/.crossbar/server.crt" "https://localhost:${PORT}/" > "${work}/index.html" 2>/dev/null; then
         break
     fi
     if ! kill -0 "${cb_pid}" 2>/dev/null; then
