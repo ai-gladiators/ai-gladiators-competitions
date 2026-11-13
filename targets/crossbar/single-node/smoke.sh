@@ -274,8 +274,11 @@ for name, reason in (("stranger", "wamp.error.not_authorized"), ("intruder", "wa
         fail.append(f"{name}: the router let it join application1")
     elif not refused or any(r["error"] != reason for r in refused):
         fail.append(f"{name}: expected refusals with {reason}, got {[r.get('error') for r in refused]}")
+    elif [(r.get("attempt"), r.get("next_s")) for r in refused] != [(n, 5.0 * 2 ** (n - 1)) for n in range(1, len(refused) + 1)]:
+        # each refusal in a row doubles the delay before the next attempt (competitions#10)
+        fail.append(f"{name}: expected backing-off refusals, got {[(r.get('attempt'), r.get('next_s')) for r in refused]}")
     else:
-        print(f"    {name}: refused {len(refused)}x with {reason}")
+        print(f"    {name}: refused {len(refused)}x with {reason}, backing off {[r['next_s'] for r in refused]} s")
 if fail:
     print("FAIL:", *fail, sep="\n  ", file=sys.stderr)
     sys.exit(1)

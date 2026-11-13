@@ -33,6 +33,12 @@ from autobahn.wamp.types import PublishOptions, RegisterOptions, SubscribeOption
 PREFIX = "gladiators."
 # While waiting for its peers, a client logs who is still missing this often (seconds).
 PEER_WAIT_REPORT_S = 30.0
+# A transport failure (router not up yet, connection refused, TLS) is retried at this
+# pace at most (seconds): clients start in any order and find the router quickly.
+TRANSPORT_MAX_DELAY_S = 5.0
+# A refused join is retried after REFUSED_FIRST_DELAY_S, doubling with each refusal in a
+# row, up to --refused-max-delay (competitions#10).
+REFUSED_FIRST_DELAY_S = 5.0
 TICK = PREFIX + "tick"
 
 
@@ -45,6 +51,11 @@ def check_echo(result, payload, peer, my_authid):
     if result.get("caller_seen") != my_authid:
         return "router reported another caller authid"
     return None
+
+
+def refused_delay(attempt, cap):
+    """Seconds before the next join after `attempt` refusals in a row: 5, 10, 20, ... up to cap."""
+    return min(REFUSED_FIRST_DELAY_S * 2 ** (attempt - 1), cap)
 
 
 def check_tick(tick, my_realm):
@@ -68,6 +79,17 @@ def self_test():
     assert check_tick({"realm": "application1", "name": "client05"}, "application1") is None
     assert check_tick({"realm": "application2", "name": "client07"}, "application1") == "tick from another realm"
     assert check_tick("junk", "application1") == "tick from another realm"
+    assert [refused_delay(n, 300) for n in range(1, 10)] == [5, 10, 20, 40, 80, 160, 300, 300, 300]
+    assert [refused_delay(n, 12) for n in range(1, 4)] == [5, 10, 12]
+    pace = Pace(_FakeTransport())
+    assert pace.refused() == 5 and pace.refused() == 10 and pace.refused() == 20
+    assert pace.transport.max_retry_delay == 20 and pace.transport.retry_delay * pace.transport.retry_delay_growth == 20
+    pace.transport_failed()  # the router went away meanwhile: find it again quickly, keep the count
+    assert pace.transport.max_retry_delay == TRANSPORT_MAX_DELAY_S and pace.attempt == 3
+    assert pace.refused() == 40
+    pace.joined()  # a join resets the count and the pace
+    assert pace.attempt == 0 and pace.transport.max_retry_delay == TRANSPORT_MAX_DELAY_S
+    assert pace.refused() == 5
     print("self-test OK: every check fires on its case")
 
 
@@ -131,6 +153,12 @@ def parse_args(argv=None):
         default=5.0,
         help="after --duration: seconds to keep serving echo before leaving (peers may still be calling)",
     )
+    p.add_argument(
+        "--refused-max-delay",
+        type=float,
+        default=300.0,
+        help="after a refused join, retry after 5 s, doubling up to this many seconds (default 300)",
+    )
     args = p.parse_args(argv)
     if not (args.generate_key or args.self_test):
         for k in ("name", "realm", "trust", "log"):
@@ -179,6 +207,55 @@ class Log:
         self._f.close()
 
 
+class _FakeTransport:
+    """The fields of autobahn's per-transport retry state that Pace uses (for --self-test)."""
+
+    def __init__(self):
+        self.max_retry_delay = TRANSPORT_MAX_DELAY_S
+        self.initial_retry_delay = 1.5
+        self.retry_delay = 1.5
+        self.retry_delay_growth = 1.5
+
+
+class Pace:
+    """How soon the client tries again (competitions#10).
+
+    autobahn's Component waits between attempts with its own, cancellable delay
+    (comp.stop() ends it at once). Pace sets that delay: after a refused join, the
+    next delay is refused_delay(attempt); after a transport failure, the fast pace.
+    """
+
+    FIELDS = ("max_retry_delay", "initial_retry_delay", "retry_delay", "retry_delay_growth")
+
+    def __init__(self, transport, cap=300.0):
+        missing = [f for f in self.FIELDS if not hasattr(transport, f)]
+        if missing:
+            # an autobahn that changed its retry state: refuse to run rather than retry blindly
+            raise SystemExit(f"this autobahn's transport has no {', '.join(missing)}: the retry pace cannot be set")
+        self.transport = transport
+        self.cap = cap
+        self.attempt = 0
+
+    def _next(self, delay):
+        # Component's next_delay() returns retry_delay * growth (jittered), capped at max_retry_delay
+        self.transport.max_retry_delay = delay
+        self.transport.retry_delay = delay / self.transport.retry_delay_growth
+
+    def refused(self):
+        self.attempt += 1
+        delay = refused_delay(self.attempt, self.cap)
+        self._next(delay)
+        return delay
+
+    def transport_failed(self):
+        self.transport.max_retry_delay = TRANSPORT_MAX_DELAY_S
+        self.transport.retry_delay = min(self.transport.retry_delay, self.transport.initial_retry_delay)
+
+    def joined(self):
+        self.attempt = 0
+        self.transport.max_retry_delay = TRANSPORT_MAX_DELAY_S
+
+
 def make_transport(url, trust):
     """TLS that trusts exactly `trust`, and checks the certificate for the URL's host."""
     u = urlparse(url)
@@ -186,7 +263,7 @@ def make_transport(url, trust):
     ctx.check_hostname = True
     host = u.hostname
     endpoint = {"type": "tcp", "host": host, "port": u.port or 8080, "tls": ctx}
-    common = {"endpoint": endpoint, "max_retries": -1, "max_retry_delay": 5}
+    common = {"endpoint": endpoint, "max_retries": -1, "max_retry_delay": TRANSPORT_MAX_DELAY_S}
     if u.scheme == "wss":
         return {"type": "websocket", "url": url, "serializers": ["cbor"], **common}
     if u.scheme == "rss":
@@ -215,6 +292,8 @@ def main(argv=None):
 
     transport = make_transport(args.url, args.trust)
     comp = Component(transports=[transport], realm=args.realm, authentication=authentication)
+    # Component keeps one retry state per transport; this client has exactly one
+    pace = Pace(comp._transports[0], cap=args.refused_max_delay)
     state = {"authid": None, "stop": False, "joined": False}
 
     def echo(payload, details=None):
@@ -316,13 +395,24 @@ def main(argv=None):
         if state["joined"]:
             log.write("leave", ok=True, reason=details.reason)
         else:
-            # the router ended the session before it was joined: a refused join
-            log.write("refused", ok=False, error=details.reason, message=details.message)
+            # the router ended the session before it was joined: a refused join. It will
+            # not change by itself (a key not authorized yet), so back off.
+            next_s = pace.refused()
+            log.write(
+                "refused", ok=False, error=details.reason, message=details.message, attempt=pace.attempt, next_s=next_s
+            )
+
+    @comp.on_connectfailure
+    def _(component, exc):
+        # a refused join also ends here, as an ApplicationError; that pace is set above
+        if not isinstance(exc, ApplicationError):
+            pace.transport_failed()
 
     @comp.on_join
     async def joined(session, details):
         state["authid"] = details.authid
         state["joined"] = True
+        pace.joined()
         # measured on the live connection: the WebSocket extensions (e.g. permessage-deflate)
         # the router and this client agreed on; None on RawSocket
         ws_ext = getattr(getattr(session, "_transport", None), "websocket_extensions_in_use", None)
