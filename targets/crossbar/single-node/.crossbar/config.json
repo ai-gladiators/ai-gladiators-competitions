@@ -107,7 +107,9 @@
                                     "client04": {
                                         "realm": "application1",
                                         "role": "device",
-                                        "authorized_keys": []
+                                        "authorized_keys": [
+                                            "09b2ab118c29d021604b9f04f488a3e86dd82710dfe25f485c5d79d18b9b505b"
+                                        ]
                                     },
                                     "client05": {
                                         "realm": "application1",
@@ -155,7 +157,9 @@
                                         "client04": {
                                             "realm": "application1",
                                             "role": "device",
-                                            "authorized_keys": []
+                                            "authorized_keys": [
+                                                "09b2ab118c29d021604b9f04f488a3e86dd82710dfe25f485c5d79d18b9b505b"
+                                            ]
                                         },
                                         "client05": {
                                             "realm": "application1",

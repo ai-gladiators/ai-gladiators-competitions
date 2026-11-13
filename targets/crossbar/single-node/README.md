@@ -66,7 +66,7 @@ There is no key material in this repository.
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout .crossbar/server.key -out .crossbar/server.crt -days 30 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost"
   ```
 
-- **The Cryptosign principals** `client04` to `client09` start with empty `authorized_keys`. Each client generates its own key, and only its public key goes into `config.json`. While the list is empty, the router refuses that principal.
+- **The Cryptosign principals** `client04` to `client09` start with empty `authorized_keys`. Each client generates its own key on its first start, and a deployment adds that client's public key to its principal in `config.json`, in both transports. A public key is not key material: the private key never leaves its client. While a principal's list is empty, the router refuses it.
 
 ## The client
 
