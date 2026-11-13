@@ -77,8 +77,9 @@ A client:
 1. joins its realm, anonymously or with its Cryptosign key, and reconnects forever if the connection drops;
 2. registers `gladiators.<name>.echo`, which returns `{payload, callee, caller_seen}`;
 3. subscribes to `gladiators.tick`;
-4. in a loop driven by `--seed`, calls a random peer's `echo` with a payload of 16 to 1024 bytes (`--rate` calls per second on average), and publishes a tick carrying its realm and its name on about every second iteration;
-5. checks every answer:
+4. waits until the `echo` of every peer answers (see "Start-up" below);
+5. in a loop driven by `--seed`, calls a random peer's `echo` with a payload of 16 to 1024 bytes (`--rate` calls per second on average), and publishes a tick carrying its realm and its name on about every second iteration;
+6. checks every answer:
    - the payload comes back unchanged;
    - the answer comes from the peer it called;
    - the router reported the caller's own authid to the callee;
@@ -86,7 +87,7 @@ A client:
 
 With `--duration` the client stops in two phases: it stops calling, waits for its call in flight, keeps answering `echo` for `--stop-grace` seconds (default 5) while its peers finish, and only then leaves.
 
-Every event becomes one JSON line in `--log`, with an fsync after each line: connect, join, refused join, call, publish, received tick, leave, disconnect, and a final summary. A record carries a timestamp, the operation, the peer, the latency in ms, `ok` or the error, and a `violation` field whenever a check fails. Call latency (for example the p99) and the error rate come straight out of these logs.
+Every event becomes one JSON line in `--log`, with an fsync after each line: connect, join, refused join, peer ready, waiting for peers, workload start, call, publish, received tick, leave, disconnect, and a final summary. A record carries a timestamp, the operation, the peer, the latency in ms, `ok` or the error, and a `violation` field whenever a check fails. Call latency (for example the p99) and the error rate come straight out of these logs.
 
 Prove that every check fires on its own case:
 
@@ -107,6 +108,12 @@ python client/workload.py --name client04 --realm application1 --key client04.ke
 ```
 
 Use `--url rss://localhost:8080` for RawSocket. Without `--key` the client authenticates anonymously, which only the realm `public` admits.
+
+### Start-up: no client depends on another starting first
+
+Every client is callee and subscriber (it registers its `echo` and subscribes to the tick right after joining) as well as caller and publisher. Before its workload makes the first call, it waits until the `echo` of every peer answers. This barrier has **no deadline** by default: a deployment may start its clients minutes apart, for example one machine at a time, and a call to a peer that has not started yet would fail for a reason that has nothing to do with the router. A peer that never comes is visible: every 30 seconds the client logs a `peer_wait` record naming the peers still missing. `--peer-wait N` gives up after N seconds instead, logs `peer_ready` with `ok: false` for each missing peer, and starts anyway; the smoke test uses 60, so a client that never starts fails it instead of hanging it.
+
+When its barrier is passed, a client logs `workload_start`. **A match's measurement window starts at the latest `workload_start` across all clients**: records before it belong to the start-up, not to the match.
 
 ## Smoke test
 
