@@ -74,7 +74,7 @@ Each client runs [`client/workload.py`](client/workload.py). It needs AutobahnPy
 
 A client:
 
-1. joins its realm, anonymously or with its Cryptosign key, and reconnects forever if the connection drops;
+1. joins its realm, anonymously or with its Cryptosign key, and tries again forever if the connection drops or the join is refused (see "Retrying" below);
 2. registers `gladiators.<name>.echo`, which returns `{payload, callee, caller_seen}`;
 3. subscribes to `gladiators.tick`;
 4. waits until the `echo` of every peer answers (see "Start-up" below);
@@ -115,6 +115,15 @@ Every client is callee and subscriber (it registers its `echo` and subscribes to
 
 When its barrier is passed, a client logs `workload_start`. **A match's measurement window starts at the latest `workload_start` across all clients**: records before it belong to the start-up, not to the match.
 
+### Retrying: a refused join backs off
+
+A client never gives up, but it retries two kinds of failure at two different paces:
+
+- **A transport failure** (the router is not up yet, the connection is refused, a TLS error): it retries within 5 seconds at most. This is what lets clients and router start in any order.
+- **A refused join** (for example `wamp.error.not_authorized`, a key the router does not know yet): it retries after 5 seconds, doubling with each refusal in a row (5, 10, 20, ..., capped at `--refused-max-delay`, default 300). A refusal does not go away by itself: until the router is given the client's key, retrying fast only costs the router a TLS handshake and an authentication each time, and an expected refusal looks like an unknown key trying its luck. Each `refused` record carries `attempt` (refusals in a row) and `next_s`, the delay before the next attempt. That is an upper bound: autobahn's retry jitter (10 %) can make the actual delay a little shorter, which keeps clients refused together from retrying in step.
+
+A successful join resets both. Once the router knows the key, the client joins within `--refused-max-delay` seconds; restarting the client joins at once.
+
 ## Smoke test
 
 [`smoke.sh`](smoke.sh) runs the whole target on one machine:
@@ -123,7 +132,7 @@ When its barrier is passed, a client logs `workload_start`. **A match's measurem
 2. it generates a throwaway TLS pair and throwaway client keys there;
 3. it starts the router on the epoll reactor and the nine clients for `DURATION` seconds (default 120), and prints the stack of both ends;
 4. it requires every client log to show calls and ticks from its own realm, with no errors and no violations, and every WebSocket connection to have no extensions negotiated;
-5. it requires the router to refuse an unknown Cryptosign key (`wamp.error.not_authorized`) and an anonymous client in `application1` (`wamp.error.no_such_role`).
+5. it requires the router to refuse an unknown Cryptosign key (`wamp.error.not_authorized`) and an anonymous client in `application1` (`wamp.error.no_such_role`), and each of those two clients to back off after every refusal.
 
 ```console
 PYTHON=/path/to/venv/bin/python CROSSBAR=/path/to/venv/bin/crossbar ./smoke.sh
