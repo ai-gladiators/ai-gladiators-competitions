@@ -1,3 +1,0 @@
-# SPDX-License-Identifier: MIT
-# The workload client: AutobahnPython on asyncio, CBOR, WAMP-Cryptosign (PyNaCl).
-autobahn[asyncio,encryption,serialization]>=24.4.2
