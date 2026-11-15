@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: MIT
+#
+# The workload client's dependencies (ai-gladiators-competitions#14). uv.lock next to
+# this file is the exact set every client runs: make a venv from it with
+#
+#   uv sync --frozen --project targets/crossbar/single-node/client
+#
+# and update it with `uv lock` after any change here (`just check` refuses a stale
+# lock). AutobahnPython is pinned to the exact release the clients run: an image for
+# this target refuses a lock whose release differs from the one it bakes.
+
+[project]
+name = "crossbar-single-node-client"
+version = "0"
+description = "The workload client of the Crossbar.io single-node target"
+requires-python = "==3.14.*"
+dependencies = [
+    # asyncio, CBOR, WAMP-Cryptosign (PyNaCl)
+    "autobahn[asyncio,encryption,serialization]==26.11.1",
+]
+
+[tool.uv]
+# A script and its dependencies, not a package to build or install.
+package = false

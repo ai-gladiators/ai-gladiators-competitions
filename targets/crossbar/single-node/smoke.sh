@@ -12,7 +12,7 @@
 #      errors and no violations; and require the router to refuse an unknown
 #      key and an anonymous client in an authenticated realm.
 #
-# Environment: PYTHON (with autobahn, see client/requirements.txt), CROSSBAR
+# Environment: PYTHON (the client's locked venv: uv sync --frozen --project client), CROSSBAR
 # (the crossbar executable), DURATION (default 120), PORT (default 8080),
 # KEEP=1 to keep the temporary directory.
 #
@@ -58,7 +58,7 @@ fi
 
 # Fail at once, in plain words, when the environment cannot run the test.
 if ! command -v "${PYTHON}" >/dev/null 2>&1; then
-    echo "FAIL: PYTHON=${PYTHON} is not an executable; set PYTHON to the python of a venv with client/requirements.txt installed (see README)" >&2
+    echo "FAIL: PYTHON=${PYTHON} is not an executable; set PYTHON to the python of the client's venv, made with: uv sync --frozen --project targets/crossbar/single-node/client (see README)" >&2
     exit 1
 fi
 missing="$("${PYTHON}" -c '
@@ -66,7 +66,7 @@ import importlib.util
 print(" ".join(m for m in ("autobahn", "cbor2", "nacl") if importlib.util.find_spec(m) is None))
 ' 2>/dev/null)" || missing="(python failed to run)"
 if [ -n "${missing}" ]; then
-    echo "FAIL: PYTHON=${PYTHON} cannot import: ${missing}; set PYTHON to the python of a venv with client/requirements.txt installed (see README)" >&2
+    echo "FAIL: PYTHON=${PYTHON} cannot import: ${missing}; set PYTHON to the python of the client's venv, made with: uv sync --frozen --project targets/crossbar/single-node/client (see README)" >&2
     exit 1
 fi
 if ! command -v "${CROSSBAR}" >/dev/null 2>&1; then

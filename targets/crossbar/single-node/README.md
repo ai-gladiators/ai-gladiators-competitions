@@ -70,7 +70,13 @@ There is no key material in this repository.
 
 ## The client
 
-Each client runs [`client/workload.py`](client/workload.py). It needs AutobahnPython with asyncio, CBOR and Cryptosign support; see [`client/requirements.txt`](client/requirements.txt).
+Each client runs [`client/workload.py`](client/workload.py). It needs AutobahnPython with asyncio, CBOR and Cryptosign support. [`client/pyproject.toml`](client/pyproject.toml) declares that, with AutobahnPython pinned to the exact release the clients run, and [`client/uv.lock`](client/uv.lock) holds the exact set of packages, with their hashes. Every client runs that set, however much later it is installed. From the repository root:
+
+```console
+uv sync --frozen --project targets/crossbar/single-node/client
+```
+
+makes the venv `targets/crossbar/single-node/client/.venv` from the lock; `--frozen` installs the lock as committed and fails if it no longer matches `pyproject.toml`. A change of the dependencies is a change of `pyproject.toml` followed by `uv lock` in `client/`, committed together; `just check` refuses a lock that is out of date.
 
 A client:
 
@@ -138,7 +144,7 @@ A successful join resets both. Once the router knows the key, the client joins w
 PYTHON=/path/to/venv/bin/python CROSSBAR=/path/to/venv/bin/crossbar ./smoke.sh
 ```
 
-`PYTHON` must have the client's requirements installed ([`client/requirements.txt`](client/requirements.txt)), and `CROSSBAR` must be the `crossbar` executable. The defaults are `python3` and `crossbar` on the `PATH`. The test checks both before it starts, and stops with a message naming the variable.
+`PYTHON` must be the python of the client's venv (`targets/crossbar/single-node/client/.venv/bin/python`, made by `uv sync --frozen` as in "The client" above), and `CROSSBAR` must be the `crossbar` executable. The defaults are `python3` and `crossbar` on the `PATH`. The test checks both before it starts, and stops with a message naming the variable.
 
 It listens on port 8080 (`PORT` changes that). When that port is already taken, the test refuses to start and names the port. To keep it off the host's network, run it in its own network namespace:
 
