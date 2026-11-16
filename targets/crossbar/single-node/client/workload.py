@@ -4,7 +4,8 @@
 Each of the nine clients runs this program. It joins its realm, registers its own
 `gladiators.<name>.echo`, subscribes to `gladiators.tick`, and then, driven by a
 seed, calls its peers' echo procedures and publishes ticks. It checks every answer
-and writes one JSON line per event to its log, with an fsync after each line.
+and writes one JSON line per event to its log, from a thread of its own, each line
+durable before the next (competitions#19).
 
     python workload.py --generate-key client04.key
     python workload.py --name client04 --realm application1 --key client04.key \\
@@ -16,12 +17,16 @@ Without --key the client authenticates anonymously (realm `public`).
 
 import argparse
 import asyncio
+import atexit
 import binascii
 import json
 import os
+import queue
 import random
 import ssl
 import sys
+import tempfile
+import threading
 import time
 from datetime import UTC, datetime
 from urllib.parse import urlparse
@@ -166,6 +171,65 @@ def _loop_test(hang, delay, lose_after):
     return asyncio.run(run())
 
 
+def _log_test():
+    """competitions#19: order, drain, off the loop, the failure path, O_DSYNC."""
+    import fcntl
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "t.jsonl")
+        # order and drain: every record arrives, complete, in order, when close() returns
+        log = Log(path, "client04", "application1")
+        assert fcntl.fcntl(log._fd, fcntl.F_GETFL) & os.O_DSYNC, "log not opened O_DSYNC"
+        for i in range(2000):
+            log.write("call", ok=True, i=i)
+        log.close()
+        with open(path) as f:
+            recs = [json.loads(line) for line in f]
+        assert [r["i"] for r in recs] == list(range(2000)), "records lost or out of order"
+        assert all(r["name"] == "client04" and r["realm"] == "application1" for r in recs)
+
+        # off the loop: with storage taking 20 ms per write, write() does not wait
+        def slow_write(fd, data):
+            time.sleep(0.02)
+            return os.write(fd, data)
+
+        log = Log(os.path.join(d, "slow.jsonl"), "c", "r", _os_write=slow_write)
+        t0 = time.monotonic()
+        for i in range(50):
+            log.write("call", ok=True, i=i)
+        took = time.monotonic() - t0
+        assert took < 0.02, f"write() waited for storage ({took:.3f} s for 50 records)"
+        assert log.backlog_max >= 2, log.backlog_max  # they queued, and were counted
+        log.close()
+        with open(os.path.join(d, "slow.jsonl")) as f:
+            assert [json.loads(line)["i"] for line in f] == list(range(50))
+
+        # a short write is completed, not truncated
+        def short_write(fd, data):
+            return os.write(fd, data[: max(1, len(data) // 3)])
+
+        log = Log(os.path.join(d, "short.jsonl"), "c", "r", _os_write=short_write)
+        for i in range(20):
+            log.write("call", ok=True, i=i)
+        log.close()
+        with open(os.path.join(d, "short.jsonl")) as f:
+            assert [json.loads(line)["i"] for line in f] == list(range(20))
+
+        # a failed write reaches on_error, and close() does not hang
+        failures = []
+
+        def failing_write(fd, data):
+            raise OSError(5, "Input/output error")
+
+        log = Log(os.path.join(d, "fail.jsonl"), "c", "r", on_error=failures.append, _os_write=failing_write)
+        log.write("call", ok=True)
+        t = threading.Thread(target=log.close)
+        t.start()
+        t.join(5)
+        assert not t.is_alive(), "close() hung after a failed write"
+        assert len(failures) == 1 and isinstance(failures[0], OSError), failures
+
+
 def self_test():
     """Every check fires on the input it exists for, and stays quiet otherwise."""
     good = {"payload": b"x", "callee": "client05", "caller_seen": "client04"}
@@ -199,6 +263,7 @@ def self_test():
     records, took = _loop_test(hang=False, delay=0.01, lose_after=0.2)
     assert records and all(ok and sent for _, ok, sent in records), records  # attached: it works
     assert {op for op, _, _ in records} == {"call", "publish"}, records
+    _log_test()
     print("self-test OK: every check fires on its case")
 
 
@@ -293,14 +358,42 @@ def read_key(path):
         return f.read().strip()
 
 
-class Log:
-    """Append-only JSON Lines; every record is flushed and fsync'd before the next."""
+def _log_failed(exc):
+    """A log that cannot be written ends the client: a match without its evidence is void."""
+    print(f"workload: the log cannot be written ({exc}); stopping", file=sys.stderr, flush=True)
+    os._exit(3)
 
-    def __init__(self, path, name, realm):
-        self._f = open(path, "a", encoding="utf-8")
+
+class Log:
+    """Append-only JSON Lines, written and made durable by a thread of its own (competitions#19).
+
+    `write()` takes the record's timestamp when the event happens and only queues the
+    record, so the event loop never waits for storage. The writer thread writes the
+    records in order; the file is opened with O_DSYNC, so every write is durable when
+    it returns, with no fsync. Linux's NFS client does not widen a write on such a
+    file to the whole cached page, so each write should carry its own bytes only. Records that queued up while a write was in progress go out
+    together in the next write.
+
+    A crash loses the records still in the queue: normally the one in flight, more
+    when storage is slow (the summary record says the deepest the queue got). A
+    failed write calls `on_error` (default: end the process with exit code 3).
+    """
+
+    def __init__(self, path, name, realm, on_error=_log_failed, _os_write=os.write):
+        self._fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_DSYNC, 0o644)
         self._base = {"name": name, "realm": realm}
         self.errors = 0
         self.violations = 0
+        self.backlog_max = 0
+        self._q = queue.SimpleQueue()
+        self._on_error = on_error
+        self._os_write = _os_write
+        self._closed = False
+        # A daemon, so an exception that skips close() cannot keep the process alive;
+        # atexit still drains the queue on any normal exit (not on os._exit).
+        self._thread = threading.Thread(target=self._writer, name="log-writer", daemon=True)
+        self._thread.start()
+        atexit.register(self.close)
 
     def write(self, op, **fields):
         rec = {"ts": datetime.now(UTC).isoformat(timespec="microseconds"), "op": op, **self._base, **fields}
@@ -308,12 +401,36 @@ class Log:
             self.errors += 1
         if rec.get("violation"):
             self.violations += 1
-        self._f.write(json.dumps(rec, sort_keys=True) + "\n")
-        self._f.flush()
-        os.fsync(self._f.fileno())
+        self._q.put((json.dumps(rec, sort_keys=True) + "\n").encode("utf-8"))
+        self.backlog_max = max(self.backlog_max, self._q.qsize())
+
+    def _writer(self):
+        while True:
+            lines = [self._q.get()]
+            while True:
+                try:
+                    lines.append(self._q.get_nowait())
+                except queue.Empty:
+                    break
+            done = lines[-1] is None
+            data = b"".join(line for line in lines if line is not None)
+            try:
+                while data:
+                    data = data[self._os_write(self._fd, data) :]
+            except Exception as exc:  # noqa: BLE001 - any failure ends the log, loudly
+                self._on_error(exc)
+                return
+            if done:
+                return
 
     def close(self):
-        self._f.close()
+        """Write everything queued, then close: when this returns, every record is durable."""
+        if self._closed:
+            return
+        self._closed = True
+        self._q.put(None)
+        self._thread.join()
+        os.close(self._fd)
 
 
 class _FakeTransport:
@@ -576,7 +693,13 @@ def main(argv=None):
     except KeyboardInterrupt:
         pass
     finally:
-        log.write("summary", ok=log.errors == 0 and log.violations == 0, errors=log.errors, violations=log.violations)
+        log.write(
+            "summary",
+            ok=log.errors == 0 and log.violations == 0,
+            errors=log.errors,
+            violations=log.violations,
+            log_backlog_max=log.backlog_max,
+        )
         log.close()
     return 0
 
