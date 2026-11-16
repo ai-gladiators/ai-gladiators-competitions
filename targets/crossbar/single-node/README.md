@@ -142,19 +142,19 @@ A successful join resets both. Once the router knows the key, the client joins w
 4. it requires every client log to show calls and ticks from its own realm, with no errors and no violations, and every WebSocket connection to have no extensions negotiated;
 5. it requires the router to refuse an unknown Cryptosign key (`wamp.error.not_authorized`) and an anonymous client in `application1` (`wamp.error.no_such_role`), and each of those two clients to back off after every refusal.
 
-```console
-PYTHON=/path/to/venv/bin/python CROSSBAR=/path/to/venv/bin/crossbar ./smoke.sh
-```
-
-`PYTHON` must be the python of the client's venv (`targets/crossbar/single-node/client/.venv/bin/python`, made by `uv sync --frozen` as in "The client" above), and `CROSSBAR` must be the `crossbar` executable. The defaults are `python3` and `crossbar` on the `PATH`. The test checks both before it starts, and stops with a message naming the variable.
-
-It listens on port 8080 (`PORT` changes that). When that port is already taken, the test refuses to start and names the port. To keep it off the host's network, run it in its own network namespace:
+From the repository root:
 
 ```console
-unshare -rn --pid --fork --mount-proc ./smoke.sh
+just smoke ~/work/autobahn-crossbar/crossbar/.venvs/cpy314/bin/crossbar 18080
 ```
 
-From the repository root, `just smoke` does the same.
+The first argument is the `crossbar` executable (default: `crossbar` on the `PATH`), the second the port (default 8080). The recipe makes the client's venv from its lock (`uv sync --frozen`, as in "The client" above) and runs the test with it, so the client under test is always the locked one.
+
+`smoke.sh` itself takes them from the environment: `PYTHON` (the python of the client's venv), `CROSSBAR` and `PORT`; the defaults are `python3`, `crossbar` and 8080. It checks the first two before it starts, and stops with a message naming the variable. When the port is already taken, it refuses to start and names the port. To keep it off the host's network, run it in its own network namespace:
+
+```console
+unshare -rn --pid --fork --mount-proc just smoke
+```
 
 ---
 
