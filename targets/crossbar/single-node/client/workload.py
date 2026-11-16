@@ -65,6 +65,107 @@ def check_tick(tick, my_realm):
     return None
 
 
+async def workload_loop(session, left, rng, rate, peers, call_once, publish_once, stopping):
+    """The workload: sleep, call a peer, maybe publish - until the client stops or the
+    session leaves (competitions#15).
+
+    After a `leave` the client issues no call and no publish: `left` (set by on_leave)
+    wakes the sleep, and the session is checked after the sleep and again before the
+    publish. Nothing can detach the session between a check and the request it guards:
+    no `await` lies between them. A call sent before the `leave` is not cancelled: it
+    fails with the session and keeps its record. The random draws are the same as
+    before this change, so a seed still gives the same calls."""
+    while not stopping() and session.is_attached():
+        try:
+            await asyncio.wait_for(left.wait(), timeout=rng.expovariate(rate))
+            return  # the session left during the sleep
+        except TimeoutError:
+            pass
+        if stopping() or not session.is_attached():
+            return
+        if peers:
+            await call_once(session, rng.choice(peers))
+        if rng.random() < 0.5:
+            if stopping() or not session.is_attached():
+                return
+            await publish_once(session)
+
+
+class _FakeRng:
+    """A fixed workload for the self-test: one delay, always the first peer, always publish."""
+
+    def __init__(self, delay):
+        self.delay = delay
+
+    def expovariate(self, rate):
+        return self.delay
+
+    def choice(self, seq):
+        return seq[0]
+
+    def random(self):
+        return 0.0
+
+
+class _FakeSession:
+    """A session as the workload sees it. lose() does what autobahn does on a lost
+    transport, in its order: fail the outstanding requests, detach, fire leave."""
+
+    def __init__(self, hang=False):
+        self.attached = True
+        self.hang = hang
+        self.pending = []
+
+    def is_attached(self):
+        return self.attached
+
+    async def request(self):
+        if not self.attached:
+            raise RuntimeError("TransportLost")
+        if self.hang:
+            fut = asyncio.get_running_loop().create_future()
+            self.pending.append(fut)
+            await fut
+
+    def lose(self, left):
+        for fut in self.pending:
+            fut.set_exception(ApplicationError("wamp.close.transport_lost"))
+        self.pending.clear()
+        self.attached = False
+        left.set()
+
+
+def _loop_test(hang, delay, lose_after):
+    """Run workload_loop on a fake session that loses its transport after lose_after
+    seconds; return the records [(op, ok, sent_before_leave)] and the seconds it ran."""
+
+    async def run():
+        session, left, records, leave_at = _FakeSession(hang), asyncio.Event(), [], []
+
+        async def request(op):
+            sent_before_leave = not leave_at
+            try:
+                await session.request()
+                records.append((op, True, sent_before_leave))
+            except Exception:  # noqa: BLE001 - as call_once/publish_once: a failure is a record
+                records.append((op, False, sent_before_leave))
+
+        def lose():
+            leave_at.append(True)
+            session.lose(left)
+
+        loop = asyncio.get_running_loop()
+        loop.call_later(lose_after, lose)
+        t0 = time.monotonic()
+        await workload_loop(
+            session, left, _FakeRng(delay), 2.0, ["client02"],
+            lambda s, peer: request("call"), lambda s: request("publish"), lambda: False,
+        )
+        return records, time.monotonic() - t0
+
+    return asyncio.run(run())
+
+
 def self_test():
     """Every check fires on the input it exists for, and stays quiet otherwise."""
     good = {"payload": b"x", "callee": "client05", "caller_seen": "client04"}
@@ -90,6 +191,14 @@ def self_test():
     pace.joined()  # a join resets the count and the pace
     assert pace.attempt == 0 and pace.transport.max_retry_delay == TRANSPORT_MAX_DELAY_S
     assert pace.refused() == 5
+    # competitions#15: no call or publish after `leave`
+    records, took = _loop_test(hang=False, delay=10.0, lose_after=0.05)
+    assert records == [] and took < 1.0, (records, took)  # left during the sleep: wakes, issues nothing
+    records, took = _loop_test(hang=True, delay=0.001, lose_after=0.05)
+    assert records == [("call", False, True)], records  # in flight at leave: failed once, nothing after it
+    records, took = _loop_test(hang=False, delay=0.01, lose_after=0.2)
+    assert records and all(ok and sent for _, ok, sent in records), records  # attached: it works
+    assert {op for op, _, _ in records} == {"call", "publish"}, records
     print("self-test OK: every check fires on its case")
 
 
@@ -328,6 +437,8 @@ def main(argv=None):
             if deadline is not None and time.monotonic() >= deadline:
                 break
             for peer in sorted(pending):
+                if not session.is_attached():
+                    return None
                 try:
                     await session.call(f"{PREFIX}{peer}.echo", b"")
                     pending.discard(peer)
@@ -394,6 +505,8 @@ def main(argv=None):
     def _(session, details):
         if state["joined"]:
             log.write("leave", ok=True, reason=details.reason)
+            # the workload issues nothing more on this session (competitions#15)
+            state["left"].set()
         else:
             # the router ended the session before it was joined: a refused join. It will
             # not change by itself (a key not authorized yet), so back off.
@@ -412,6 +525,7 @@ def main(argv=None):
     async def joined(session, details):
         state["authid"] = details.authid
         state["joined"] = True
+        state["left"] = asyncio.Event()
         pace.joined()
         # measured on the live connection: the WebSocket extensions (e.g. permessage-deflate)
         # the router and this client agreed on; None on RawSocket
@@ -427,9 +541,9 @@ def main(argv=None):
         await session.register(echo, f"{PREFIX}{args.name}.echo", options=RegisterOptions(details_arg="details"))
         await session.subscribe(on_tick, TICK, options=SubscribeOptions(details_arg="details"))
         # the workload runs as its own task, so the join completes now
-        state["task"] = asyncio.ensure_future(workload(session))
+        state["task"] = asyncio.ensure_future(workload(session, state["left"]))
 
-    async def workload(session):
+    async def workload(session, left):
         barrier = await wait_for_peers(session)
         if barrier is None:
             return
@@ -437,12 +551,7 @@ def main(argv=None):
         # The client's statement that its realm is complete (or, with --peer-wait, that
         # it gave up): a match's measurement window starts at the latest of these.
         log.write("workload_start", ok=not missing, peers=ready, missing=missing)
-        while not state["stop"] and session.is_attached():
-            await asyncio.sleep(rng.expovariate(args.rate))
-            if peers:
-                await call_once(session, rng.choice(peers))
-            if rng.random() < 0.5:
-                await publish_once(session)
+        await workload_loop(session, left, rng, args.rate, peers, call_once, publish_once, lambda: state["stop"])
 
     async def runner():
         loop = asyncio.get_running_loop()

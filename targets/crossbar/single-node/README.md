@@ -95,6 +95,8 @@ With `--duration` the client stops in two phases: it stops calling, waits for it
 
 Every event becomes one JSON line in `--log`, with an fsync after each line: connect, join, refused join, peer ready, waiting for peers, workload start, call, publish, received tick, leave, disconnect, and a final summary. A record carries a timestamp, the operation, the peer, the latency in ms, `ok` or the error, and a `violation` field whenever a check fails. Call latency (for example the p99) and the error rate come straight out of these logs.
 
+**After `leave`, a client issues no call and no publish until its next `join`.** A `call` or `publish` record with `ok: false` is therefore always a request that was sent: a call in flight when the session ends (for example `wamp.close.transport_lost` when the router stops) fails and keeps its record, once. Nothing is sent on a session the client already knows is gone (competitions#15).
+
 Prove that every check fires on its own case:
 
 ```console
@@ -140,19 +142,19 @@ A successful join resets both. Once the router knows the key, the client joins w
 4. it requires every client log to show calls and ticks from its own realm, with no errors and no violations, and every WebSocket connection to have no extensions negotiated;
 5. it requires the router to refuse an unknown Cryptosign key (`wamp.error.not_authorized`) and an anonymous client in `application1` (`wamp.error.no_such_role`), and each of those two clients to back off after every refusal.
 
-```console
-PYTHON=/path/to/venv/bin/python CROSSBAR=/path/to/venv/bin/crossbar ./smoke.sh
-```
-
-`PYTHON` must be the python of the client's venv (`targets/crossbar/single-node/client/.venv/bin/python`, made by `uv sync --frozen` as in "The client" above), and `CROSSBAR` must be the `crossbar` executable. The defaults are `python3` and `crossbar` on the `PATH`. The test checks both before it starts, and stops with a message naming the variable.
-
-It listens on port 8080 (`PORT` changes that). When that port is already taken, the test refuses to start and names the port. To keep it off the host's network, run it in its own network namespace:
+From the repository root:
 
 ```console
-unshare -rn --pid --fork --mount-proc ./smoke.sh
+just smoke ~/work/autobahn-crossbar/crossbar/.venvs/cpy314/bin/crossbar 18080
 ```
 
-From the repository root, `just smoke` does the same.
+The first argument is the `crossbar` executable (default: `crossbar` on the `PATH`), the second the port (default 8080). The recipe makes the client's venv from its lock (`uv sync --frozen`, as in "The client" above) and runs the test with it, so the client under test is always the locked one.
+
+`smoke.sh` itself takes them from the environment: `PYTHON` (the python of the client's venv), `CROSSBAR` and `PORT`; the defaults are `python3`, `crossbar` and 8080. It checks the first two before it starts, and stops with a message naming the variable. When the port is already taken, it refuses to start and names the port. To keep it off the host's network, run it in its own network namespace:
+
+```console
+unshare -rn --pid --fork --mount-proc just smoke
+```
 
 ---
 
