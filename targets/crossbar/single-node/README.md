@@ -95,6 +95,8 @@ With `--duration` the client stops in two phases: it stops calling, waits for it
 
 Every event becomes one JSON line in `--log`, with an fsync after each line: connect, join, refused join, peer ready, waiting for peers, workload start, call, publish, received tick, leave, disconnect, and a final summary. A record carries a timestamp, the operation, the peer, the latency in ms, `ok` or the error, and a `violation` field whenever a check fails. Call latency (for example the p99) and the error rate come straight out of these logs.
 
+**After `leave`, a client issues no call and no publish until its next `join`.** A `call` or `publish` record with `ok: false` is therefore always a request that was sent: a call in flight when the session ends (for example `wamp.close.transport_lost` when the router stops) fails and keeps its record, once. Nothing is sent on a session the client already knows is gone (competitions#15).
+
 Prove that every check fires on its own case:
 
 ```console
