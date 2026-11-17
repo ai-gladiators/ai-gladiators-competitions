@@ -29,7 +29,6 @@ import json
 import os
 import queue
 import random
-import secrets
 import ssl
 import sys
 import tempfile
@@ -39,6 +38,7 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from autobahn.asyncio.component import Component
+from autobahn.util import DEFAULT_TOKEN_CHARS, generate_token
 from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.types import PublishOptions, RegisterOptions, SubscribeOptions
 
@@ -52,8 +52,11 @@ TRANSPORT_MAX_DELAY_S = 5.0
 # row, up to --refused-max-delay (competitions#10).
 REFUSED_FIRST_DELAY_S = 5.0
 TICK = PREFIX + "tick"
-# A tick's flag: this many random bytes, as hex (competitions#21).
-FLAG_BYTES = 16
+# A tick's flag (competitions#21): autobahn's token, FLAG_GROUPS groups of
+# FLAG_GROUP_CHARS characters of DEFAULT_TOKEN_CHARS (27 characters without look-alikes),
+# e.g. K7AT-TMJS-WT47-SEER-3ELJ-UUYM-WRXF: 28 x log2(27) = 133 bits.
+FLAG_GROUPS = 7
+FLAG_GROUP_CHARS = 4
 
 
 def check_echo(result, payload, peer, my_authid):
@@ -81,10 +84,11 @@ def check_tick(tick, my_realm):
 
 
 def new_flag():
-    """A tick's flag: from the operating system's generator (`secrets`), never from the
-    workload's seeded `random.Random`, which repeats from its seed - a flag made by it
-    could be predicted instead of captured."""
-    return secrets.token_hex(FLAG_BYTES)
+    """A tick's flag: autobahn's `generate_token`, which draws from the operating
+    system's generator (`random.SystemRandom`), never from the workload's seeded
+    `random.Random`, which repeats from its seed - a flag made by it could be predicted
+    instead of captured."""
+    return generate_token(FLAG_GROUPS, FLAG_GROUP_CHARS)
 
 
 class Ticks:
@@ -308,11 +312,13 @@ def _flag_test():
     and flag, a failed publish too; an event record never holds a flag."""
     import re
 
-    hexflag = re.compile(rf"^[0-9a-f]{{{2 * FLAG_BYTES}}}$")
+    group = f"[{DEFAULT_TOKEN_CHARS}]{{{FLAG_GROUP_CHARS}}}"
+    flagform = re.compile(rf"^{group}(-{group}){{{FLAG_GROUPS - 1}}}$")
+    assert len(DEFAULT_TOKEN_CHARS) == len(set(DEFAULT_TOKEN_CHARS)) == 27, DEFAULT_TOKEN_CHARS
     ticks = Ticks("application1", "client04")
     sent = [ticks.next() for _ in range(1000)]
     assert [t["seq"] for t in sent] == list(range(1, 1001))
-    assert all(hexflag.match(t["flag"]) for t in sent), "a flag is not 32 hex characters"
+    assert all(flagform.match(t["flag"]) for t in sent), "a flag is not 7 groups of 4 token characters"
     assert len({t["flag"] for t in sent}) == len(sent), "a flag repeated"
     assert all(t["realm"] == "application1" and t["name"] == "client04" for t in sent)
     assert check_tick(sent[0], "application1") is None  # the new fields are accepted

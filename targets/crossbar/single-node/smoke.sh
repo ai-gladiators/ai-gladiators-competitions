@@ -234,11 +234,17 @@ if [ "${rc}" -ne 0 ]; then
 fi
 
 echo "==> check the logs"
-"${PYTHON}" -I - "${work}/logs" <<'EOF' || rc=1
+"${PYTHON}" -I - "${work}/logs" "${here}/referee/verify_flags.py" <<'EOF' || rc=1
 import json, re, sys, pathlib
 logs = pathlib.Path(sys.argv[1])
 fail = []
-hexflag = re.compile(r"^[0-9a-f]{32}$")
+from autobahn.util import DEFAULT_TOKEN_CHARS
+# the verifier repeats autobahn's token alphabet, to need only the standard library: they must agree
+m = re.search(r'^FLAG_CHARS = "([^"]*)"$', pathlib.Path(sys.argv[2]).read_text(), re.M)
+if not m or m.group(1) != DEFAULT_TOKEN_CHARS:
+    fail.append(f"the verifier's FLAG_CHARS {m and m.group(1)!r} is not autobahn's DEFAULT_TOKEN_CHARS {DEFAULT_TOKEN_CHARS!r}")
+g = f"[{DEFAULT_TOKEN_CHARS}]{{4}}"
+flagform = re.compile(rf"^{g}(-{g}){{6}}$")
 flags = {}  # flag -> (client, realm, seq): every tick's flag, from the publishers' logs (competitions#21)
 others = []  # every record that is not a publish record, of all nine clients
 def records(name):
@@ -275,8 +281,8 @@ for i in range(1, 10):
     others += [r for r in recs if r["op"] != "publish"]
     if not pubs: fail.append(f"{name}: no ticks published")
     for r in pubs:
-        if not (isinstance(r.get("seq"), int) and isinstance(r.get("flag"), str) and hexflag.match(r["flag"])):
-            fail.append(f"{name}: a publish record without a seq and a 32-hex flag: {r}")
+        if not (isinstance(r.get("seq"), int) and isinstance(r.get("flag"), str) and flagform.match(r["flag"])):
+            fail.append(f"{name}: a publish record without a seq and a flag of 7 groups of 4: {r}")
         elif r["flag"] in flags:
             fail.append(f"{name}: flag {r['flag']} published twice, also by {flags[r['flag']]}")
         else:
@@ -310,7 +316,7 @@ for realm in ("application1", "application2", "public"):
         fail.append(f"no flag published on {realm}")
     else:
         claims.append(pick)
-claims.append("0" * 32)
+claims.append("-".join(["0000"] * 7))  # the form of a flag, but 0 is not in the alphabet
 (logs.parent / "claims.txt").write_text("\n".join(claims) + "\n")
 print(f"    flags: {len(flags)} published, all distinct, none outside its publish record")
 if fail:
@@ -324,14 +330,14 @@ if [ "${rc}" -eq 0 ]; then
     "${PYTHON}" -I "${here}/referee/verify_flags.py" --logs "${work}/logs" --claims "${work}/claims.txt" \
         --start "${smoke_start}" --end "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" > "${work}/verify.txt" || rc=1
     sed 's/^/    /' "${work}/verify.txt"
-    n_counts="$(grep -cE '^ +[0-9]+ [0-9a-f]{32} counts client0[4-9] application[12] ' "${work}/verify.txt" || true)"
-    n_control="$(grep -cE '^ +[0-9]+ [0-9a-f]{32} control client0[1-3] public ' "${work}/verify.txt" || true)"
-    n_invalid="$(grep -cE '^ +[0-9]+ 0{32} invalid: in no publish record' "${work}/verify.txt" || true)"
+    n_counts="$(grep -cE '^ +[0-9]+ [A-Z0-9-]{34} counts client0[4-9] application[12] ' "${work}/verify.txt" || true)"
+    n_control="$(grep -cE '^ +[0-9]+ [A-Z0-9-]{34} control client0[1-3] public ' "${work}/verify.txt" || true)"
+    n_invalid="$(grep -cE '^ +[0-9]+ 0000(-0000){6} invalid: not a flag' "${work}/verify.txt" || true)"
     if [ "${n_counts}" != 2 ] || [ "${n_control}" != 1 ] || [ "${n_invalid}" != 1 ]; then
         echo "FAIL: expected the verifier to say counts, counts, control, invalid; got ${n_counts}, ${n_control}, ${n_invalid}" >&2
         rc=1
     else
-        echo "OK: the verifier counts the app-realm flags, marks the public one a control, refuses the unknown"
+        echo "OK: the verifier counts the app-realm flags, marks the public one a control, refuses the non-flag"
     fi
 fi
 

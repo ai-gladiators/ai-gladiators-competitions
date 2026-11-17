@@ -32,7 +32,12 @@ import sys
 import tempfile
 from datetime import UTC, datetime
 
-FLAG_RE = re.compile(r"^[0-9a-f]{32}$")
+# A flag is autobahn's token as the workload client makes it (competitions#21):
+# generate_token(7, 4), 7 groups of 4 characters of autobahn.util.DEFAULT_TOKEN_CHARS,
+# e.g. K7AT-TMJS-WT47-SEER-3ELJ-UUYM-WRXF. The alphabet is repeated here so this tool
+# needs nothing but the standard library; the smoke test checks the two agree.
+FLAG_CHARS = "345679ACEFGHJKLMNPQRSTUVWXY"
+FLAG_RE = re.compile(rf"^[{FLAG_CHARS}]{{4}}(-[{FLAG_CHARS}]{{4}}){{6}}$")
 APP_REALMS = ("application1", "application2")
 CONTROL_REALMS = ("public",)
 
@@ -102,7 +107,7 @@ def read_claims(path):
             if not text or text.startswith("#"):
                 continue
             parts = text.split()
-            flag = parts[0].lower()
+            flag = parts[0].upper()  # a flag typed in lower case is the same flag
             when, problem = None, None
             if len(parts) > 2:
                 problem = "more than a flag and a time on the line"
@@ -124,7 +129,7 @@ def judge(claims, index, start, end):
             out.append((n, shown, "invalid", problem, None))
             continue
         if not FLAG_RE.match(flag):
-            out.append((n, shown, "invalid", "not a flag: a flag is 32 hex characters", None))
+            out.append((n, shown, "invalid", "not a flag: a flag is 7 groups of 4 token characters, e.g. K7AT-TMJS-WT47-SEER-3ELJ-UUYM-WRXF", None))
             continue
         if flag in seen:
             out.append((n, flag, "invalid", f"presented before, on line {seen[flag]}", None))
@@ -190,8 +195,10 @@ def self_test():
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
         (root / "green5").mkdir()
-        f_app, f_pub, f_old, f_fail = "a" * 32, "b" * 32, "c" * 32, "d" * 32
-        f_twice = "e" * 32
+        def tok(c):
+            return "-".join([c * 4] * 7)
+
+        f_app, f_pub, f_old, f_fail, f_twice = tok("A"), tok("C"), tok("E"), tok("F"), tok("G")
         recs5 = [
             {"ts": "2026-11-17T10:00:00+00:00", "op": "start", "name": "client04", "realm": "application1"},
             {
@@ -268,19 +275,21 @@ def self_test():
                     "# a comment",
                     f_app,
                     f_pub + " 2026-11-17T10:06:00Z",
-                    "f" * 32,
+                    tok("H"),
                     f_old,
                     "nonsense",
                     f_app,
                     f_fail,
-                    f_app.upper()[:31],
+                    f_app[:-1],
                     f_twice,
                     "",
                 ]
             )
         )
         claims2 = root / "claims2.txt"
-        claims2.write_text(f_app + " 2026-11-17T10:04:00Z\n" + f_pub + " yesterday\n")
+        claims2.write_text(
+            f_app + " 2026-11-17T10:04:00Z\n" + f_pub + " yesterday\n" + f_fail.lower() + "\n" + tok("0") + "\n"
+        )
         index, stats = load_logs(root)
         assert stats["files"] == 2 and stats["malformed"] == 2, stats
         assert stats["flags"] == 6, stats
@@ -310,6 +319,8 @@ def self_test():
         res2 = judge(read_claims(claims2), index, start, end)
         assert res2[0][2] == "invalid" and "before it was published" in res2[0][3], res2
         assert res2[1][2] == "invalid" and "not an ISO 8601 time" in res2[1][3], res2
+        assert res2[2][2] == "counts" and res2[2][1] == f_fail, res2  # lower case is the same flag
+        assert res2[3][2] == "invalid" and "not a flag" in res2[3][3], res2  # 0 is not in the alphabet
         buf = io.StringIO()
         report(res, stats, start, end, out=buf)
         text = buf.getvalue()

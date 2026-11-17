@@ -99,7 +99,7 @@ Every event becomes one JSON line in `--log`: connect, join, refused join, peer 
 
 ### Flags
 
-**Every tick carries a flag** (competitions#21): the payload is `{realm, name, seq, flag}`. The flag is 16 bytes from the operating system's generator (Python's `secrets`), as 32 hex characters, fresh for every tick. It never comes from the generator `--seed` drives, which repeats from its seed. `seq` counts the client's ticks from 1 and restarts with the process, so the flag, not `seq`, identifies a tick.
+**Every tick carries a flag** (competitions#21): the payload is `{realm, name, seq, flag}`. The flag is autobahn's token, `generate_token(7, 4)`, fresh for every tick: 7 groups of 4 characters such as `K7AT-TMJS-WT47-SEER-3ELJ-UUYM-WRXF`. The alphabet is autobahn's `DEFAULT_TOKEN_CHARS`, 27 characters without look-alikes (no 0/O, 1/I, 2/Z, 8/B), so 28 characters carry 133 bits, and a flag can be read and copied by hand. The characters come from the operating system's generator (`random.SystemRandom`), never from the generator `--seed` drives, which repeats from its seed. `seq` counts the client's ticks from 1 and restarts with the process, so the flag, not `seq`, identifies a tick.
 
 **The publisher records each flag, and nobody else does.** The `publish` record holds the tick's `seq` and `flag`, also when the publish failed, since a failed publish's flag may still have left the client. A `received tick` record holds the publisher, the realm and the check, never the flag. So a flag found in the logs is always in its publisher's record, which says which client published it, on which realm, and when.
 
@@ -112,7 +112,7 @@ python3 -I referee/verify_flags.py --logs <dir> --claims <file> --start <iso> --
 ```
 
 - `--logs` is searched for `*.jsonl`, also in subdirectories.
-- A claim line is a flag, optionally followed by the UTC time the player says it obtained it.
+- A claim line is a flag, optionally followed by the UTC time the player says it obtained it. A flag in lower case is the same flag.
 - `--start` and `--end` are the match window.
 
 For each claim it prints one line:
@@ -168,8 +168,8 @@ A successful join resets both. Once the router knows the key, the client joins w
 3. it starts the router on the epoll reactor and the nine clients for `DURATION` seconds (default 120), and prints the stack of both ends;
 4. it requires every client log to show calls and ticks from its own realm, with no errors and no violations, and every WebSocket connection to have no extensions negotiated;
 5. it requires the router to refuse an unknown Cryptosign key (`wamp.error.not_authorized`) and an anonymous client in `application1` (`wamp.error.no_such_role`), and each of those two clients to back off after every refusal;
-6. it requires every `publish` record to hold a `seq` (1, 2, 3, ...) and a 32-hex flag, no flag twice across the nine logs, and no flag in any other record;
-7. it gives the referee's verifier four claims: a flag of each app realm, one of `public` and a value never published. It requires `counts`, `counts`, `control` and `invalid`.
+6. it requires every `publish` record to hold a `seq` (1, 2, 3, ...) and a flag of 7 groups of 4 token characters, no flag twice across the nine logs, and no flag in any other record; and the verifier's copy of the token alphabet to be autobahn's;
+7. it gives the referee's verifier four claims: a flag of each app realm, one of `public` and a value of the flag's form outside its alphabet. It requires `counts`, `counts`, `control` and `invalid`.
 
 From the repository root:
 
