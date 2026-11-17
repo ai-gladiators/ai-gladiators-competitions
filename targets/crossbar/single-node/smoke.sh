@@ -198,6 +198,8 @@ peers_of() {
 }
 
 echo "==> nine clients for ${DURATION} s (+ stop grace)"
+# the match window the verifier is given starts here: no flag is older
+smoke_start="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
 pids=()
 n=0
 for c in client01 client02 client03 client04 client05 client06 client07 client08 client09; do
@@ -233,9 +235,12 @@ fi
 
 echo "==> check the logs"
 "${PYTHON}" -I - "${work}/logs" <<'EOF' || rc=1
-import json, sys, pathlib
+import json, re, sys, pathlib
 logs = pathlib.Path(sys.argv[1])
 fail = []
+hexflag = re.compile(r"^[0-9a-f]{32}$")
+flags = {}  # flag -> (client, realm, seq): every tick's flag, from the publishers' logs (competitions#21)
+others = []  # every record that is not a publish record, of all nine clients
 def records(name):
     p = logs / f"{name}.jsonl"
     return [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
@@ -266,6 +271,19 @@ for i in range(1, 10):
         fail.append(f"{name}: expected one workload_start with every peer ready, got {starts}")
     if not calls: fail.append(f"{name}: no calls")
     if not events: fail.append(f"{name}: no ticks received")
+    pubs = [r for r in recs if r["op"] == "publish"]
+    others += [r for r in recs if r["op"] != "publish"]
+    if not pubs: fail.append(f"{name}: no ticks published")
+    for r in pubs:
+        if not (isinstance(r.get("seq"), int) and isinstance(r.get("flag"), str) and hexflag.match(r["flag"])):
+            fail.append(f"{name}: a publish record without a seq and a 32-hex flag: {r}")
+        elif r["flag"] in flags:
+            fail.append(f"{name}: flag {r['flag']} published twice, also by {flags[r['flag']]}")
+        else:
+            flags[r["flag"]] = (name, r["realm"], r["seq"])
+    seqs = [r.get("seq") for r in pubs]
+    if seqs != list(range(1, len(seqs) + 1)):
+        fail.append(f"{name}: publish seqs are not 1, 2, 3, ...: {seqs[:10]}")
     for r in bad[:3]: fail.append(f"{name}: {r}")
 for name, reason in (("stranger", "wamp.error.not_authorized"), ("intruder", "wamp.error.no_such_role")):
     recs = records(name)
@@ -279,11 +297,43 @@ for name, reason in (("stranger", "wamp.error.not_authorized"), ("intruder", "wa
         fail.append(f"{name}: expected backing-off refusals, got {[(r.get('attempt'), r.get('next_s')) for r in refused]}")
     else:
         print(f"    {name}: refused {len(refused)}x with {reason}, backing off {[r['next_s'] for r in refused]} s")
+# only the publisher records a flag: no other record of any client holds one, under any key
+text = json.dumps(others)
+leaked = [f for f in flags if f in text]
+if leaked:
+    fail.append(f"{len(leaked)} flags appear in records other than their publish record, e.g. {leaked[0]}")
+# claims for the verifier: one flag of each app realm, one of public, one value never published
+claims = []
+for realm in ("application1", "application2", "public"):
+    pick = next((f for f, (_, r, _) in flags.items() if r == realm), None)
+    if pick is None:
+        fail.append(f"no flag published on {realm}")
+    else:
+        claims.append(pick)
+claims.append("0" * 32)
+(logs.parent / "claims.txt").write_text("\n".join(claims) + "\n")
+print(f"    flags: {len(flags)} published, all distinct, none outside its publish record")
 if fail:
     print("FAIL:", *fail, sep="\n  ", file=sys.stderr)
     sys.exit(1)
 print("OK: nine clients, own-realm ticks only, no errors, no violations; both intruders refused")
 EOF
+
+if [ "${rc}" -eq 0 ]; then
+    echo "==> the referee's verifier on four claims (competitions#22)"
+    "${PYTHON}" -I "${here}/referee/verify_flags.py" --logs "${work}/logs" --claims "${work}/claims.txt" \
+        --start "${smoke_start}" --end "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" > "${work}/verify.txt" || rc=1
+    sed 's/^/    /' "${work}/verify.txt"
+    n_counts="$(grep -cE '^ +[0-9]+ [0-9a-f]{32} counts client0[4-9] application[12] ' "${work}/verify.txt" || true)"
+    n_control="$(grep -cE '^ +[0-9]+ [0-9a-f]{32} control client0[1-3] public ' "${work}/verify.txt" || true)"
+    n_invalid="$(grep -cE '^ +[0-9]+ 0{32} invalid: in no publish record' "${work}/verify.txt" || true)"
+    if [ "${n_counts}" != 2 ] || [ "${n_control}" != 1 ] || [ "${n_invalid}" != 1 ]; then
+        echo "FAIL: expected the verifier to say counts, counts, control, invalid; got ${n_counts}, ${n_control}, ${n_invalid}" >&2
+        rc=1
+    else
+        echo "OK: the verifier counts the app-realm flags, marks the public one a control, refuses the unknown"
+    fi
+fi
 
 if [ "${rc}" -ne 0 ]; then
     tail -n 40 "${work}/crossbar.log" >&2
