@@ -8,9 +8,16 @@
 #   3. start Crossbar.io (epoll reactor) and the nine clients for DURATION
 #      seconds, and print what both ends actually run on (Python, OpenSSL,
 #      library versions, event loop);
-#   4. require every client log to show calls and ticks of its own realm, no
-#      errors and no violations; and require the router to refuse an unknown
-#      key and an anonymous client in an authenticated realm.
+#   4. require the router to refuse an unknown key and an anonymous client in
+#      an authenticated realm;
+#   5. inject three events on application1 that no member published as such (a
+#      second copy of a tick, a forged tick, an off-topic event: smoke_inject.py);
+#   6. require every client log to show calls and ticks of its own realm, no
+#      errors, and exactly the violations the injected events must cause; every
+#      flag in its publish record only;
+#   7. run the referee's tools: verify_flags.py on digests and a flag, and
+#      verify_events.py, which must find the three injected events at each
+#      member of application1 and nothing else (competitions#22, #24).
 #
 # Environment: PYTHON (the client's locked venv: uv sync --frozen --project client), CROSSBAR
 # (the crossbar executable), DURATION (default 120), PORT (default 8080),
@@ -225,6 +232,12 @@ echo "==> refusals: an unknown key, and an anonymous client in an authenticated 
     --seed smoke --log "${work}/logs/intruder.jsonl" \
     --duration 5 > "${work}/logs/intruder.out" 2>&1 || true
 
+echo "==> injected events on application1: a second copy, a forged tick, an off-topic event"
+"${PYTHON}" "${here}/smoke_inject.py" --name client04 --realm application1 \
+    --key "${work}/keys/client04.key" --forge-as client05 \
+    --url "wss://localhost:${PORT}/ws" --trust "${node}/.crossbar/server.crt" \
+    --out "${work}/inject.json" > "${work}/inject.out" 2>&1 || true
+
 rc=0
 for p in "${pids[@]}"; do
     wait "${p}" || rc=1
@@ -234,10 +247,24 @@ if [ "${rc}" -ne 0 ]; then
 fi
 
 echo "==> check the logs"
-"${PYTHON}" -I - "${work}/logs" "${here}/referee/verify_flags.py" <<'EOF' || rc=1
-import json, re, sys, pathlib
+"${PYTHON}" -I - "${work}/logs" "${here}/referee/verify_flags.py" "${work}/inject.json" <<'EOF' || rc=1
+import collections, hashlib, json, re, sys, pathlib
 logs = pathlib.Path(sys.argv[1])
 fail = []
+inject = json.loads(pathlib.Path(sys.argv[3]).read_text()) if pathlib.Path(sys.argv[3]).exists() else {"error": "no report"}
+if "error" in inject:
+    fail.append(f"the injector failed: {inject['error']}")
+# the violations the injected events must cause, and no other (competitions#24)
+expected = collections.Counter()
+if "replayed" in inject:
+    for member in ("client04", "client05", "client06"):
+        expected[(member, "event on an unexpected topic")] += 1
+    forged = "names this client, but it did not publish this digest, or already received it"
+    expected[(inject["forged"]["name"], forged)] += 1  # its name, a digest it never made
+    expected[(inject["replayed"]["name"], forged)] += 1  # its own tick, a second time
+    print(f"    injected as {inject['authid']}: a copy of {inject['replayed']['name']} seq={inject['replayed']['seq']},"
+          f" a tick forged as {inject['forged']['name']}, an event on {inject['off_topic']}")
+violations = collections.Counter()
 from autobahn.util import DEFAULT_TOKEN_CHARS
 # the verifier repeats autobahn's token alphabet, to need only the standard library: they must agree
 m = re.search(r'^FLAG_CHARS = "([^"]*)"$', pathlib.Path(sys.argv[2]).read_text(), re.M)
@@ -261,13 +288,14 @@ for i in range(1, 10):
     calls = [r for r in recs if r["op"] == "call"]
     events = [r for r in recs if r["op"] == "event"]
     joins = [r for r in recs if r["op"] == "join"]
-    bad = [r for r in recs if r.get("error") or r.get("violation")]
+    bad = [r for r in recs if r.get("error")]
+    violations.update((name, r["violation"]) for r in recs if r.get("violation"))
     lat = sorted(r["latency_ms"] for r in calls if r.get("ok"))
     p99 = lat[int(0.99 * (len(lat) - 1))] if lat else None
     wsx = joins[0].get("websocket_extensions") if joins else None
     via = "RawSocket" if joins and wsx is None else f"WebSocket ext={wsx}"
     print(f"    {name} {recs[0]['realm'] if recs else '?':13} {via:20} joins={len(joins)} calls={len(calls)} "
-          f"events={len(events)} bad={len(bad)} p99_ms={p99}")
+          f"events={len(events)} errors={len(bad)} violations={sum(1 for r in recs if r.get('violation'))} p99_ms={p99}")
     if not joins: fail.append(f"{name}: never joined")
     for j in joins:
         if j.get("websocket_extensions"):  # None on RawSocket, [] on WebSocket without extensions
@@ -303,41 +331,79 @@ for name, reason in (("stranger", "wamp.error.not_authorized"), ("intruder", "wa
         fail.append(f"{name}: expected backing-off refusals, got {[(r.get('attempt'), r.get('next_s')) for r in refused]}")
     else:
         print(f"    {name}: refused {len(refused)}x with {reason}, backing off {[r['next_s'] for r in refused]} s")
+if violations != expected:
+    fail.append(f"violations: expected {dict(expected)}, got {dict(violations)}")
+else:
+    print(f"    violations: exactly the {sum(expected.values())} the injected events must cause")
 # only the publisher records a flag: no other record of any client holds one, under any key
 text = json.dumps(others)
 leaked = [f for f in flags if f in text]
 if leaked:
     fail.append(f"{len(leaked)} flags appear in records other than their publish record, e.g. {leaked[0]}")
-# claims for the verifier: one flag of each app realm, one of public, one value never published
+# every tick on the wire carried its flag's digest: each member recorded the digests it received
+digests = {hashlib.sha256(f.encode("utf-8")).hexdigest() for f in flags}
+received = [r for r in others if r["op"] == "event" and r.get("topic") == "gladiators.tick"]
+# (the forged tick is the one exception: only the member it names can tell on arrival)
+allowed = digests | ({inject["forged"]["digest"]} if "forged" in inject else set())
+if not received or not all(r.get("digest") in allowed for r in received if r.get("violation") is None):
+    fail.append("an event without a violation carries a digest of no published flag")
+# claims for the verifier: a digest of each app realm and of public, one flag, one non-claim
 claims = []
 for realm in ("application1", "application2", "public"):
     pick = next((f for f, (_, r, _) in flags.items() if r == realm), None)
     if pick is None:
         fail.append(f"no flag published on {realm}")
     else:
-        claims.append(pick)
+        claims.append(hashlib.sha256(pick.encode("utf-8")).hexdigest())
+claims.append(next((f for f, (_, r, _) in flags.items() if r == "application2"), ""))  # the flag itself
 claims.append("-".join(["0000"] * 7))  # the form of a flag, but 0 is not in the alphabet
 (logs.parent / "claims.txt").write_text("\n".join(claims) + "\n")
-print(f"    flags: {len(flags)} published, all distinct, none outside its publish record")
+print(f"    flags: {len(flags)} published, all distinct, none outside its publish record; {len(received)} ticks received")
 if fail:
     print("FAIL:", *fail, sep="\n  ", file=sys.stderr)
     sys.exit(1)
-print("OK: nine clients, own-realm ticks only, no errors, no violations; both intruders refused")
+print("OK: nine clients, own-realm ticks only, no errors, the injected events seen; both intruders refused")
 EOF
 
 if [ "${rc}" -eq 0 ]; then
-    echo "==> the referee's verifier on four claims (competitions#22)"
+    echo "==> the referee's verify_flags.py on five claims (competitions#22, #24)"
     "${PYTHON}" -I "${here}/referee/verify_flags.py" --logs "${work}/logs" --claims "${work}/claims.txt" \
         --start "${smoke_start}" --end "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" > "${work}/verify.txt" || rc=1
     sed 's/^/    /' "${work}/verify.txt"
-    n_counts="$(grep -cE '^ +[0-9]+ [A-Z0-9-]{34} counts client0[4-9] application[12] ' "${work}/verify.txt" || true)"
-    n_control="$(grep -cE '^ +[0-9]+ [A-Z0-9-]{34} control client0[1-3] public ' "${work}/verify.txt" || true)"
-    n_invalid="$(grep -cE '^ +[0-9]+ 0000(-0000){6} invalid: not a flag' "${work}/verify.txt" || true)"
-    if [ "${n_counts}" != 2 ] || [ "${n_control}" != 1 ] || [ "${n_invalid}" != 1 ]; then
-        echo "FAIL: expected the verifier to say counts, counts, control, invalid; got ${n_counts}, ${n_control}, ${n_invalid}" >&2
+    n_counts="$(grep -cE '^ +[0-9]+ [0-9a-f]{64} counts client0[4-9] application[12] ' "${work}/verify.txt" || true)"
+    n_control="$(grep -cE '^ +[0-9]+ [0-9a-f]{64} control client0[1-3] public ' "${work}/verify.txt" || true)"
+    n_obtained="$(grep -cE '^ +[0-9]+ [A-Z0-9-]{34} obtained client0[7-9] application2 ' "${work}/verify.txt" || true)"
+    n_invalid="$(grep -cE '^ +[0-9]+ 0000(-0000){6} invalid: neither a digest nor a flag' "${work}/verify.txt" || true)"
+    if [ "${n_counts}" != 2 ] || [ "${n_control}" != 1 ] || [ "${n_obtained}" != 1 ] || [ "${n_invalid}" != 1 ]; then
+        echo "FAIL: expected counts 2, control 1, obtained 1, invalid 1; got ${n_counts}, ${n_control}, ${n_obtained}, ${n_invalid}" >&2
         rc=1
     else
-        echo "OK: the verifier counts the app-realm flags, marks the public one a control, refuses the non-flag"
+        echo "OK: the app-realm digests count, the public one is a control, the flag is reported apart, the non-claim refused"
+    fi
+fi
+
+if [ "${rc}" -eq 0 ]; then
+    echo "==> the referee's verify_events.py (competitions#24)"
+    "${PYTHON}" -I "${here}/referee/verify_events.py" --logs "${work}/logs" \
+        --start "${smoke_start}" --end "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" > "${work}/events.txt" || rc=1
+    sed 's/^/    /' "${work}/events.txt"
+    # each member of application1: some matched, exactly three injected; application2: none injected
+    if ! "${PYTHON}" -I - "${work}/events.txt" <<'EOF'
+import re, sys
+rows = {}
+for line in open(sys.argv[1]):
+    m = re.match(r"^  (application[12]) +(client0[4-9]) +(\d+) +(\d+) +(\d+)$", line)
+    if m:
+        rows[m.group(2)] = (m.group(1), int(m.group(3)), int(m.group(4)))
+want_injected = {"client04": 3, "client05": 3, "client06": 3, "client07": 0, "client08": 0, "client09": 0}
+ok = set(rows) == set(want_injected) and all(rows[c][1] > 0 and rows[c][2] == n for c, n in want_injected.items())
+sys.exit(0 if ok else 1)
+EOF
+    then
+        echo "FAIL: expected three injected events at each member of application1, none on application2" >&2
+        rc=1
+    else
+        echo "OK: verify_events finds the three injected events at each member of application1, and nothing else"
     fi
 fi
 
