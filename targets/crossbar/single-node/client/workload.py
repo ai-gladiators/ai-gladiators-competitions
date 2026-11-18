@@ -7,6 +7,12 @@ seed, calls its peers' echo procedures and publishes ticks. It checks every answ
 and writes one JSON line per event to its log, from a thread of its own, each line
 durable before the next (competitions#19).
 
+Every tick carries a flag: 16 random bytes from the operating system, fresh per tick,
+recorded in the publisher's own log together with the tick's sequence number
+(competitions#21). A flag held by anyone who is not a member of the realm it was
+published on shows that the realm's confidentiality was broken; the referee checks a
+presented flag against the publishers' logs (referee/verify_flags.py).
+
     python workload.py --generate-key client04.key
     python workload.py --name client04 --realm application1 --key client04.key \\
         --peers client05,client06 --url wss://localhost:8080/ws --trust server.crt \\
@@ -32,6 +38,7 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from autobahn.asyncio.component import Component
+from autobahn.util import DEFAULT_TOKEN_CHARS, generate_token
 from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.types import PublishOptions, RegisterOptions, SubscribeOptions
 
@@ -45,6 +52,11 @@ TRANSPORT_MAX_DELAY_S = 5.0
 # row, up to --refused-max-delay (competitions#10).
 REFUSED_FIRST_DELAY_S = 5.0
 TICK = PREFIX + "tick"
+# A tick's flag (competitions#21): autobahn's token, FLAG_GROUPS groups of
+# FLAG_GROUP_CHARS characters of DEFAULT_TOKEN_CHARS (27 characters without look-alikes),
+# e.g. K7AT-TMJS-WT47-SEER-3ELJ-UUYM-WRXF: 28 x log2(27) = 133 bits.
+FLAG_GROUPS = 7
+FLAG_GROUP_CHARS = 4
 
 
 def check_echo(result, payload, peer, my_authid):
@@ -64,10 +76,75 @@ def refused_delay(attempt, cap):
 
 
 def check_tick(tick, my_realm):
-    """The violation a received tick shows, or None."""
+    """The violation a received tick shows, or None. Only the realm is judged; the
+    other fields (name, seq, flag) are the publisher's and are not checked here."""
     if not isinstance(tick, dict) or tick.get("realm") != my_realm:
         return "tick from another realm"
     return None
+
+
+def new_flag():
+    """A tick's flag: autobahn's `generate_token`, which draws from the operating
+    system's generator (`random.SystemRandom`), never from the workload's seeded
+    `random.Random`, which repeats from its seed - a flag made by it could be predicted
+    instead of captured."""
+    return generate_token(FLAG_GROUPS, FLAG_GROUP_CHARS)
+
+
+class Ticks:
+    """The ticks of one process: `seq` counts from 1 and restarts with the process, so
+    the flag, not the seq, identifies a tick."""
+
+    def __init__(self, realm, name, flag=new_flag):
+        self.realm = realm
+        self.name = name
+        self.seq = 0
+        self._flag = flag
+
+    def next(self):
+        self.seq += 1
+        return {"realm": self.realm, "name": self.name, "seq": self.seq, "flag": self._flag()}
+
+
+async def publish_tick(session, log, ticks):
+    """Publish the next tick and record it, with its seq and flag, in the publisher's log -
+    also when the publish fails: a failed publish's flag may still have left the client.
+    This record is the only place a flag is written (competitions#21)."""
+    tick = ticks.next()
+    t0 = time.perf_counter()
+    try:
+        await session.publish(TICK, tick, options=PublishOptions(acknowledge=True, exclude_me=False))
+    except Exception as e:  # noqa: BLE001 - every failure is a record, not a crash
+        log.write(
+            "publish",
+            latency_ms=round((time.perf_counter() - t0) * 1000, 3),
+            ok=False,
+            error=getattr(e, "error", None) or type(e).__name__,
+            seq=tick["seq"],
+            flag=tick["flag"],
+        )
+        return
+    log.write(
+        "publish",
+        latency_ms=round((time.perf_counter() - t0) * 1000, 3),
+        ok=True,
+        seq=tick["seq"],
+        flag=tick["flag"],
+    )
+
+
+def event_fields(tick, details, my_realm):
+    """The record of a received tick: who published it, on which realm, and whether that
+    is this client's realm. Never the flag: a subscriber's log is not where flags are
+    recorded, so a flag found in a log is always the publisher's (competitions#21)."""
+    violation = check_tick(tick, my_realm)
+    return {
+        "peer": tick.get("name") if isinstance(tick, dict) else None,
+        "from_realm": tick.get("realm") if isinstance(tick, dict) else None,
+        "publisher_seen": details.publisher_authid if details else None,
+        "ok": violation is None,
+        "violation": violation,
+    }
 
 
 async def workload_loop(session, left, rng, rate, peers, call_once, publish_once, stopping):
@@ -230,6 +307,65 @@ def _log_test():
         assert len(failures) == 1 and isinstance(failures[0], OSError), failures
 
 
+def _flag_test():
+    """competitions#21: each tick a fresh flag; the publish record holds the tick's seq
+    and flag, a failed publish too; an event record never holds a flag."""
+    import re
+
+    group = f"[{DEFAULT_TOKEN_CHARS}]{{{FLAG_GROUP_CHARS}}}"
+    flagform = re.compile(rf"^{group}(-{group}){{{FLAG_GROUPS - 1}}}$")
+    assert len(DEFAULT_TOKEN_CHARS) == len(set(DEFAULT_TOKEN_CHARS)) == 27, DEFAULT_TOKEN_CHARS
+    ticks = Ticks("application1", "client04")
+    sent = [ticks.next() for _ in range(1000)]
+    assert [t["seq"] for t in sent] == list(range(1, 1001))
+    assert all(flagform.match(t["flag"]) for t in sent), "a flag is not 7 groups of 4 token characters"
+    assert len({t["flag"] for t in sent}) == len(sent), "a flag repeated"
+    assert all(t["realm"] == "application1" and t["name"] == "client04" for t in sent)
+    assert check_tick(sent[0], "application1") is None  # the new fields are accepted
+    assert check_tick(sent[0], "application2") == "tick from another realm"
+    # a seeded generator would make the same flags again; the flags must not follow a seed
+    random.seed(1)
+    a = Ticks("public", "client01").next()["flag"]
+    random.seed(1)
+    b = Ticks("public", "client01").next()["flag"]
+    assert a != b, "the flag follows the seeded generator"
+
+    class _Pub:
+        def __init__(self, fail):
+            self.fail = fail
+            self.published = []
+
+        async def publish(self, topic, payload, options=None):
+            self.published.append((topic, payload))
+            if self.fail:
+                raise ApplicationError("wamp.error.not_authorized")
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "f.jsonl")
+        log = Log(path, "client04", "application1")
+        ticks = Ticks("application1", "client04")
+        ok_session, failing_session = _Pub(False), _Pub(True)
+        asyncio.run(publish_tick(ok_session, log, ticks))
+        asyncio.run(publish_tick(failing_session, log, ticks))
+
+        class _Details:
+            publisher_authid = "client05"
+
+        log.write("event", **event_fields(ok_session.published[0][1], _Details(), "application1"))
+        log.close()
+        with open(path) as f:
+            recs = [json.loads(line) for line in f]
+        pubs = [r for r in recs if r["op"] == "publish"]
+        payloads = [ok_session.published[0][1], failing_session.published[0][1]]
+        assert [p["ok"] for p in pubs] == [True, False], pubs
+        assert [(p["seq"], p["flag"]) for p in pubs] == [(t["seq"], t["flag"]) for t in payloads], (pubs, payloads)
+        assert ok_session.published[0][0] == TICK
+        (event,) = [r for r in recs if r["op"] == "event"]
+        assert "flag" not in event and "seq" not in event, event
+        assert payloads[0]["flag"] not in json.dumps(event), "the flag reached an event record"
+        assert event["ok"] and event["peer"] == "client04" and event["from_realm"] == "application1", event
+
+
 def self_test():
     """Every check fires on the input it exists for, and stays quiet otherwise."""
     good = {"payload": b"x", "callee": "client05", "caller_seen": "client04"}
@@ -264,6 +400,7 @@ def self_test():
     assert records and all(ok and sent for _, ok, sent in records), records  # attached: it works
     assert {op for op, _, _ in records} == {"call", "publish"}, records
     _log_test()
+    _flag_test()
     print("self-test OK: every check fires on its case")
 
 
@@ -509,6 +646,7 @@ def main(argv=None):
     log = Log(args.log, args.name, args.realm)
     log.write("start", ok=True, stack=stack(args.url))
     rng = random.Random(f"{args.seed}:{args.name}")
+    ticks = Ticks(args.realm, args.name)
     peers = [p for p in args.peers.split(",") if p]
 
     if args.key:
@@ -526,15 +664,7 @@ def main(argv=None):
         return {"payload": payload, "callee": args.name, "caller_seen": details.caller_authid if details else None}
 
     def on_tick(tick, details=None):
-        violation = check_tick(tick, args.realm)
-        log.write(
-            "event",
-            peer=tick.get("name") if isinstance(tick, dict) else None,
-            from_realm=tick.get("realm") if isinstance(tick, dict) else None,
-            publisher_seen=details.publisher_authid if details else None,
-            ok=violation is None,
-            violation=violation,
-        )
+        log.write("event", **event_fields(tick, details, args.realm))
 
     async def wait_for_peers(session):
         """The barrier: wait until every peer's echo answers, so no call of the workload
@@ -592,22 +722,7 @@ def main(argv=None):
         log.write("call", peer=peer, bytes=len(payload), latency_ms=ms, ok=violation is None, violation=violation)
 
     async def publish_once(session):
-        t0 = time.perf_counter()
-        try:
-            await session.publish(
-                TICK,
-                {"realm": args.realm, "name": args.name},
-                options=PublishOptions(acknowledge=True, exclude_me=False),
-            )
-        except Exception as e:  # noqa: BLE001
-            log.write(
-                "publish",
-                latency_ms=round((time.perf_counter() - t0) * 1000, 3),
-                ok=False,
-                error=getattr(e, "error", None) or type(e).__name__,
-            )
-            return
-        log.write("publish", latency_ms=round((time.perf_counter() - t0) * 1000, 3), ok=True)
+        await publish_tick(session, log, ticks)
 
     @comp.on_connect
     def _(session, transport):
