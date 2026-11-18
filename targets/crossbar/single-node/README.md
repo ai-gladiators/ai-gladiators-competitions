@@ -82,45 +82,64 @@ A client:
 
 1. joins its realm, anonymously or with its Cryptosign key, and tries again forever if the connection drops or the join is refused (see "Retrying" below);
 2. registers `gladiators.<name>.echo`, which returns `{payload, callee, caller_seen}`;
-3. subscribes to `gladiators.tick`;
+3. subscribes to every topic under `gladiators.` (a prefix subscription), so every event of its realm's namespace reaches its log (competitions#24);
 4. waits until the `echo` of every peer answers (see "Start-up" below);
-5. in a loop driven by `--seed`, calls a random peer's `echo` with a payload of 16 to 1024 bytes (`--rate` calls per second on average), and publishes a tick carrying its realm, its name, a sequence number and a flag on about every second iteration (see "Flags" below);
+5. in a loop driven by `--seed`, calls a random peer's `echo` with a payload of 16 to 1024 bytes (`--rate` calls per second on average), and publishes a tick carrying its realm, its name, a sequence number and the digest of a flag on about every second iteration, with `exclude_me=False`, so it receives its own ticks too (see "Flags" below);
 6. checks every answer:
    - the payload comes back unchanged;
    - the answer comes from the peer it called;
    - the router reported the caller's own authid to the callee;
-   - every tick it receives comes from its own realm.
+   - every event it receives is a tick on `gladiators.tick`, of the expected shape, from its own realm;
+   - a tick that names this client as its publisher carries a digest this client published, and comes back once.
 
 With `--duration` the client stops in two phases: it stops calling, waits for its call in flight, keeps answering `echo` for `--stop-grace` seconds (default 5) while its peers finish, and only then leaves.
 
-Every event becomes one JSON line in `--log`: connect, join, refused join, peer ready, waiting for peers, workload start, call, publish, received tick, leave, disconnect, and a final summary. A record carries a timestamp, the operation, the peer, the latency in ms, `ok` or the error, and a `violation` field whenever a check fails. Call latency (for example the p99) and the error rate come straight out of these logs.
+Every event becomes one JSON line in `--log`: connect, join, refused join, peer ready, waiting for peers, workload start, call, publish, received event, leave, disconnect, and a final summary. A record carries a timestamp, the operation, the peer, the latency in ms, `ok` or the error, and a `violation` field whenever a check fails. Call latency (for example the p99) and the error rate come straight out of these logs.
 
 **Writing the log does not hold up the client** (competitions#19). A record's timestamp is taken when the event happens; a thread of its own then writes the records in order to a file opened with `O_DSYNC`, so each write is durable when it returns. Before, the client wrote and fsync'd every line on its event loop. With the log on NFS, every record then waited for a round trip to the server, and every 194-byte record re-sent its 4 KiB page: 51 MiB/h of NFS traffic per client, for 4 MB/h of log. A crash loses the records still queued, normally the one in flight. The `summary` record's `log_backlog_max` says the deepest the queue got. A log that cannot be written ends the client with exit code 3.
 
 ### Flags
 
-**Every tick carries a flag** (competitions#21): the payload is `{realm, name, seq, flag}`. The flag is autobahn's token, `generate_token(7, 4)`, fresh for every tick: 7 groups of 4 characters such as `K7AT-TMJS-WT47-SEER-3ELJ-UUYM-WRXF`. The alphabet is autobahn's `DEFAULT_TOKEN_CHARS`, 27 characters without look-alikes (no 0/O, 1/I, 2/Z, 8/B), so 28 characters carry 133 bits, and a flag can be read and copied by hand. The characters come from the operating system's generator (`random.SystemRandom`), never from the generator `--seed` drives, which repeats from its seed. `seq` counts the client's ticks from 1 and restarts with the process, so the flag, not `seq`, identifies a tick.
+**Every tick has a flag** (competitions#21), and **carries only the flag's digest** (competitions#24): the payload is `{realm, name, seq, digest}`, where `digest` is the SHA-256 of the flag's UTF-8 bytes, as 64 hex characters. The flag is autobahn's token, `generate_token(7, 4)`, fresh for every tick: 7 groups of 4 characters such as `K7AT-TMJS-WT47-SEER-3ELJ-UUYM-WRXF`. The alphabet is autobahn's `DEFAULT_TOKEN_CHARS`, 27 characters without look-alikes (no 0/O, 1/I, 2/Z, 8/B), so 28 characters carry 133 bits, and a flag can be read and copied by hand. The characters come from the operating system's generator (`random.SystemRandom`), never from the generator `--seed` drives, which repeats from its seed. `seq` counts the client's ticks from 1 and restarts with the process, so the flag, not `seq`, identifies a tick.
 
-**The publisher records each flag, and nobody else does.** The `publish` record holds the tick's `seq` and `flag`, also when the publish failed, since a failed publish's flag may still have left the client. A `received tick` record holds the publisher, the realm and the check, never the flag. So a flag found in the logs is always in its publisher's record, which says which client published it, on which realm, and when.
+**The publisher records each flag, and nobody else does.** The `publish` record holds the tick's `seq` and `flag`, also when the publish failed, since a failed publish may still have reached subscribers. No event carries a flag: subscribers, the router and anyone else who sees a tick see only the digest. So a flag found in the logs is always in its publisher's record, which says which client published it, on which realm, and when.
 
-**What a flag shows.** `application1` and `application2` admit only their Cryptosign principals. A flag of one of them, held by anyone who is not a member of that realm, shows the realm's confidentiality was broken. A flag of `public` shows nothing of the kind, since anyone may subscribe there: it is a control.
+**Every received event is recorded** with its topic, the publisher, realm, `seq` and digest it states, and `publisher_seen`, the publisher's authid as the router disclosed it. A received field longer than 80 characters is recorded as its type and length only.
 
-**The referee checks a presented flag** with [`referee/verify_flags.py`](referee/verify_flags.py) (competitions#22), standard library only:
+**What a digest and a flag show.** `application1` and `application2` admit only their Cryptosign principals.
+- A **digest** of an app-realm tick, held by anyone who is not a member of that realm, shows that an event of the realm reached them. A digest of `public` shows nothing of the kind, since anyone may subscribe there: it is a control.
+- A **flag** never travels in an event, so a flag held by anyone but its publisher shows that the publisher's log, share or process was read: beyond WAMP.
+- An **event on an app realm that no member published** shows that someone got an event delivered there: the other direction.
+
+**The referee checks presented digests and flags** with [`referee/verify_flags.py`](referee/verify_flags.py) (competitions#22, #24), standard library only:
 
 ```console
 python3 -I referee/verify_flags.py --logs <dir> --claims <file> --start <iso> --end <iso>
 ```
 
 - `--logs` is searched for `*.jsonl`, also in subdirectories.
-- A claim line is a flag, optionally followed by the UTC time the player says it obtained it. A flag in lower case is the same flag.
+- A claim line is a digest or a flag, optionally followed by the UTC time the player says it obtained it. Case does not matter.
 - `--start` and `--end` are the match window.
 
 For each claim it prints one line:
-- `counts`: the flag was published on `application1` or `application2` within the window. The line names the client, the realm, `seq` and the publish time.
-- `control`: the flag was published on `public` within the window.
-- `invalid`, with the reason: not a flag, in no publish record, published outside the window, claimed before it was published, presented twice, or in more than one publish record.
+- `counts`: a digest of a flag published on `application1` or `application2` within the window. The line names the client, the realm, `seq` and the publish time.
+- `control`: a digest of a flag published on `public` within the window.
+- `obtained`: a flag itself, published within the window, on any realm. Flags are totalled apart from digests.
+- `invalid`, with the reason: neither a digest nor a flag, in no publish record, published outside the window, claimed before it was published, presented twice, or in more than one publish record.
 
-At the end come the totals. The verdict is the referee's, not the tool's. `--self-test` runs its checks.
+At the end come the totals, for digests and for flags. The verdict is the referee's, not the tool's. `--self-test` runs its checks.
+
+**The referee traces every received event** with [`referee/verify_events.py`](referee/verify_events.py) (competitions#24), standard library only:
+
+```console
+python3 -I referee/verify_events.py --logs <dir> --start <iso> --end <iso>
+```
+
+For every event recorded by a client of `application1` or `application2` within the window:
+- `matched`: the digest is in exactly one publish record, which states the same publisher, realm and `seq`, was published on the subscriber's realm, and this subscriber has not recorded the digest before.
+- `injected`, with the reason: another topic than `gladiators.tick`, no digest, a digest in no publish record, a publish record that states otherwise, one of another realm, or a second copy at the same subscriber.
+
+It prints one line per injected event and, per realm and subscriber, the number matched, the number injected, and the number whose `publisher_seen` differs from the publisher the event states.
 
 **After `leave`, a client issues no call and no publish until its next `join`.** A `call` or `publish` record with `ok: false` is therefore always a request that was sent: a call in flight when the session ends (for example `wamp.close.transport_lost` when the router stops) fails and keeps its record, once. Nothing is sent on a session the client already knows is gone (competitions#15).
 
@@ -166,10 +185,12 @@ A successful join resets both. Once the router knows the key, the client joins w
 1. it copies the node directory to a temporary directory;
 2. it generates a throwaway TLS pair and throwaway client keys there;
 3. it starts the router on the epoll reactor and the nine clients for `DURATION` seconds (default 120), and prints the stack of both ends;
-4. it requires every client log to show calls and ticks from its own realm, with no errors and no violations, and every WebSocket connection to have no extensions negotiated;
+4. it requires every client log to show calls and ticks from its own realm, with no errors, exactly the violations the injected events of step 6 must cause, and every WebSocket connection to have no extensions negotiated;
 5. it requires the router to refuse an unknown Cryptosign key (`wamp.error.not_authorized`) and an anonymous client in `application1` (`wamp.error.no_such_role`), and each of those two clients to back off after every refusal;
-6. it requires every `publish` record to hold a `seq` (1, 2, 3, ...) and a flag of 7 groups of 4 token characters, no flag twice across the nine logs, and no flag in any other record; and the verifier's copy of the token alphabet to be autobahn's;
-7. it gives the referee's verifier four claims: a flag of each app realm, one of `public` and a value of the flag's form outside its alphabet. It requires `counts`, `counts`, `control` and `invalid`.
+6. [`smoke_inject.py`](smoke_inject.py) joins `application1` as a second session of `client04` and publishes three events no member published as such: a second copy of another member's tick, a tick that names `client05` with a digest nobody published, and an event on `gladiators.smoke.unexpected`. Each member must record the off-topic event as a violation; `client05` must reject the tick forged as it, and the publisher of the copied tick the copy;
+7. it requires every `publish` record to hold a `seq` (1, 2, 3, ...) and a flag of 7 groups of 4 token characters, no flag twice across the nine logs, no flag in any other record, and every received tick to carry the digest of a published flag (but the forged one); and the verifier's copy of the token alphabet to be autobahn's;
+8. it gives `verify_flags.py` five claims: the digest of a flag of each app realm and of `public`, a flag of `application2` itself, and a value of the flag's form outside its alphabet. It requires `counts`, `counts`, `control`, `obtained` and `invalid`;
+9. it runs `verify_events.py`, and requires exactly three injected events at each member of `application1`, none on `application2`, and matched events at every member.
 
 From the repository root:
 

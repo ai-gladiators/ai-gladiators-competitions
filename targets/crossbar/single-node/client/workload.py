@@ -2,16 +2,27 @@
 """The workload client of the Crossbar.io single-node target.
 
 Each of the nine clients runs this program. It joins its realm, registers its own
-`gladiators.<name>.echo`, subscribes to `gladiators.tick`, and then, driven by a
-seed, calls its peers' echo procedures and publishes ticks. It checks every answer
+`gladiators.<name>.echo`, subscribes to every topic under `gladiators.`, and then,
+driven by a seed, calls its peers' echo procedures and publishes ticks on
+`gladiators.tick`. It checks every answer
 and writes one JSON line per event to its log, from a thread of its own, each line
 durable before the next (competitions#19).
 
-Every tick carries a flag: 16 random bytes from the operating system, fresh per tick,
-recorded in the publisher's own log together with the tick's sequence number
-(competitions#21). A flag held by anyone who is not a member of the realm it was
-published on shows that the realm's confidentiality was broken; the referee checks a
-presented flag against the publishers' logs (referee/verify_flags.py).
+Every tick has a flag: an autobahn token, fresh per tick, recorded only in the
+publisher's own `publish` record together with the tick's sequence number
+(competitions#21). The tick on the wire carries the flag's SHA-256 digest, never the
+flag (competitions#24), so no subscriber, the router or a player can learn a flag
+from an event:
+
+- a digest held by anyone who is not a member of the realm it was published on shows
+  that an event of that realm reached them (referee/verify_flags.py);
+- a flag held by anyone but its publisher shows that the publisher's log or process
+  was read;
+- every event a client receives is logged with its topic, the stated publisher, realm,
+  seq and digest, so the referee can trace it to exactly one publish record, or report
+  it as injected (referee/verify_events.py). An event that names this client as its
+  publisher, but carries a digest it did not publish or one it already received, is a
+  violation on arrival.
 
     python workload.py --generate-key client04.key
     python workload.py --name client04 --realm application1 --key client04.key \\
@@ -25,15 +36,18 @@ import argparse
 import asyncio
 import atexit
 import binascii
+import hashlib
 import json
 import os
 import queue
 import random
+import re
 import ssl
 import sys
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
@@ -57,6 +71,16 @@ TICK = PREFIX + "tick"
 # e.g. K7AT-TMJS-WT47-SEER-3ELJ-UUYM-WRXF: 28 x log2(27) = 133 bits.
 FLAG_GROUPS = 7
 FLAG_GROUP_CHARS = 4
+# What a tick carries instead of its flag (competitions#24): the SHA-256 of the flag's
+# UTF-8 bytes, as 64 lower-case hex characters.
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+TICK_FIELDS = ("digest", "name", "realm", "seq")
+# A publisher remembers the digests of its own ticks until it receives them back
+# (exclude_me=False), at most this many: in normal operation a tick comes back within
+# milliseconds; a publish that failed may never come back.
+OWN_DIGESTS_KEPT = 4096
+# A field of a received event longer than this is logged as its type and length only.
+FIELD_MAX = 80
 
 
 def check_echo(result, payload, peer, my_authid):
@@ -75,11 +99,27 @@ def refused_delay(attempt, cap):
     return min(REFUSED_FIRST_DELAY_S * 2 ** (attempt - 1), cap)
 
 
-def check_tick(tick, my_realm):
-    """The violation a received tick shows, or None. Only the realm is judged; the
-    other fields (name, seq, flag) are the publisher's and are not checked here."""
-    if not isinstance(tick, dict) or tick.get("realm") != my_realm:
-        return "tick from another realm"
+def digest_of(flag):
+    """The SHA-256 of a flag, as hex: what a tick carries instead of the flag (competitions#24)."""
+    return hashlib.sha256(flag.encode("utf-8")).hexdigest()
+
+
+def tick_shape(tick):
+    """What is wrong with the shape of a received tick, or None."""
+    if not isinstance(tick, dict):
+        return f"not a tick: a {type(tick).__name__} payload"
+    missing = [k for k in TICK_FIELDS if k not in tick]
+    if missing:
+        return f"not a tick: no {', '.join(missing)}"
+    extra = sorted(str(k)[:FIELD_MAX] for k in tick if k not in TICK_FIELDS)
+    if extra:
+        return f"not a tick: unexpected field {', '.join(extra)}"
+    if not (isinstance(tick["name"], str) and isinstance(tick["realm"], str)):
+        return "not a tick: name and realm are not strings"
+    if not (isinstance(tick["seq"], int) and not isinstance(tick["seq"], bool) and tick["seq"] > 0):
+        return "not a tick: seq is not a positive integer"
+    if not (isinstance(tick["digest"], str) and DIGEST_RE.match(tick["digest"])):
+        return "not a tick: digest is not 64 lower-case hex characters"
     return None
 
 
@@ -93,24 +133,45 @@ def new_flag():
 
 class Ticks:
     """The ticks of one process: `seq` counts from 1 and restarts with the process, so
-    the flag, not the seq, identifies a tick."""
+    the flag, not the seq, identifies a tick.
 
-    def __init__(self, realm, name, flag=new_flag):
+    It remembers the digests of the ticks it made until each comes back once
+    (`received`), so a tick that names this client but was not made by it, or a second
+    copy of one, is told apart on arrival (competitions#24)."""
+
+    def __init__(self, realm, name, flag=new_flag, keep=OWN_DIGESTS_KEPT):
         self.realm = realm
         self.name = name
         self.seq = 0
         self._flag = flag
+        self._keep = keep
+        self._pending = OrderedDict()
 
     def next(self):
+        """(tick, flag): the tick to publish, which carries the flag's digest, and the
+        flag, which goes into the publisher's record only."""
         self.seq += 1
-        return {"realm": self.realm, "name": self.name, "seq": self.seq, "flag": self._flag()}
+        flag = self._flag()
+        digest = digest_of(flag)
+        self._pending[digest] = self.seq
+        while len(self._pending) > self._keep:
+            self._pending.popitem(last=False)
+        return {"realm": self.realm, "name": self.name, "seq": self.seq, "digest": digest}, flag
+
+    def received(self, digest, seq):
+        """True once for each tick this client made, when it comes back with its seq."""
+        if self._pending.get(digest) != seq:
+            return False
+        del self._pending[digest]
+        return True
 
 
 async def publish_tick(session, log, ticks):
     """Publish the next tick and record it, with its seq and flag, in the publisher's log -
-    also when the publish fails: a failed publish's flag may still have left the client.
-    This record is the only place a flag is written (competitions#21)."""
-    tick = ticks.next()
+    also when the publish fails: a failed publish may still have reached subscribers.
+    This record is the only place a flag is written (competitions#21); the tick itself
+    carries only the flag's digest (competitions#24)."""
+    tick, flag = ticks.next()
     t0 = time.perf_counter()
     try:
         await session.publish(TICK, tick, options=PublishOptions(acknowledge=True, exclude_me=False))
@@ -121,7 +182,7 @@ async def publish_tick(session, log, ticks):
             ok=False,
             error=getattr(e, "error", None) or type(e).__name__,
             seq=tick["seq"],
-            flag=tick["flag"],
+            flag=flag,
         )
         return
     log.write(
@@ -129,22 +190,54 @@ async def publish_tick(session, log, ticks):
         latency_ms=round((time.perf_counter() - t0) * 1000, 3),
         ok=True,
         seq=tick["seq"],
-        flag=tick["flag"],
+        flag=flag,
     )
 
 
-def event_fields(tick, details, my_realm):
-    """The record of a received tick: who published it, on which realm, and whether that
-    is this client's realm. Never the flag: a subscriber's log is not where flags are
-    recorded, so a flag found in a log is always the publisher's (competitions#21)."""
-    violation = check_tick(tick, my_realm)
-    return {
-        "peer": tick.get("name") if isinstance(tick, dict) else None,
-        "from_realm": tick.get("realm") if isinstance(tick, dict) else None,
+def _field(value):
+    """A received value as it may go into a record: short strings and integers as they
+    are, anything else as its type (and length), so an event cannot fill the log."""
+    if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+        return value
+    if isinstance(value, str) and len(value) <= FIELD_MAX:
+        return value
+    size = f", {len(value)} long" if hasattr(value, "__len__") else ""
+    return f"<{type(value).__name__}{size}>"
+
+
+def event_fields(topic, args, kwargs, details, my_realm, ticks):
+    """The record of a received event (competitions#24): its topic, the publisher, realm,
+    seq and digest it states, the publisher the router disclosed, and the violation it
+    shows, or None. Never a flag: a tick carries only the digest, and the flag is in its
+    publisher's record only (competitions#21).
+
+    The violations, the first that applies:
+    - an event on a topic other than `gladiators.tick`;
+    - not exactly one positional argument, or not a tick of the expected shape;
+    - a tick of another realm;
+    - a tick that names this client but carries a digest it did not publish, or one it
+      already received: no other client can make this client's ticks."""
+    tick = args[0] if len(args) == 1 and not kwargs else None
+    stated = tick if isinstance(tick, dict) else {}
+    fields = {
+        "topic": _field(topic),
+        "peer": _field(stated.get("name")),
+        "from_realm": _field(stated.get("realm")),
+        "seq": _field(stated.get("seq")),
+        "digest": _field(stated.get("digest")),
         "publisher_seen": details.publisher_authid if details else None,
-        "ok": violation is None,
-        "violation": violation,
     }
+    if topic != TICK:
+        violation = "event on an unexpected topic"
+    elif tick is None:
+        violation = f"not a tick: {len(args)} positional and {len(kwargs)} keyword arguments"
+    else:
+        violation = tick_shape(tick)
+        if violation is None and tick["realm"] != my_realm:
+            violation = "tick from another realm"
+        if violation is None and tick["name"] == ticks.name and not ticks.received(tick["digest"], tick["seq"]):
+            violation = "names this client, but it did not publish this digest, or already received it"
+    return {**fields, "ok": violation is None, "violation": violation}
 
 
 async def workload_loop(session, left, rng, rate, peers, call_once, publish_once, stopping):
@@ -308,26 +401,26 @@ def _log_test():
 
 
 def _flag_test():
-    """competitions#21: each tick a fresh flag; the publish record holds the tick's seq
-    and flag, a failed publish too; an event record never holds a flag."""
-    import re
-
+    """competitions#21, #24: each tick a fresh flag, which goes into the publish record
+    only; the tick carries the flag's digest; an event record holds no flag."""
     group = f"[{DEFAULT_TOKEN_CHARS}]{{{FLAG_GROUP_CHARS}}}"
     flagform = re.compile(rf"^{group}(-{group}){{{FLAG_GROUPS - 1}}}$")
     assert len(DEFAULT_TOKEN_CHARS) == len(set(DEFAULT_TOKEN_CHARS)) == 27, DEFAULT_TOKEN_CHARS
+    assert digest_of("K7AT-TMJS-WT47-SEER-3ELJ-UUYM-WRXF") == hashlib.sha256(b"K7AT-TMJS-WT47-SEER-3ELJ-UUYM-WRXF").hexdigest()
     ticks = Ticks("application1", "client04")
     sent = [ticks.next() for _ in range(1000)]
-    assert [t["seq"] for t in sent] == list(range(1, 1001))
-    assert all(flagform.match(t["flag"]) for t in sent), "a flag is not 7 groups of 4 token characters"
-    assert len({t["flag"] for t in sent}) == len(sent), "a flag repeated"
-    assert all(t["realm"] == "application1" and t["name"] == "client04" for t in sent)
-    assert check_tick(sent[0], "application1") is None  # the new fields are accepted
-    assert check_tick(sent[0], "application2") == "tick from another realm"
+    assert [t["seq"] for t, _ in sent] == list(range(1, 1001))
+    assert all(flagform.match(f) for _, f in sent), "a flag is not 7 groups of 4 token characters"
+    assert len({f for _, f in sent}) == len(sent), "a flag repeated"
+    assert all(set(t) == set(TICK_FIELDS) for t, _ in sent), "a tick carries more or less than its four fields"
+    assert all(t["digest"] == digest_of(f) and f not in json.dumps(t) for t, f in sent), "the flag is on the wire"
+    assert all(t["realm"] == "application1" and t["name"] == "client04" for t, _ in sent)
+    assert all(tick_shape(t) is None for t, _ in sent)
     # a seeded generator would make the same flags again; the flags must not follow a seed
     random.seed(1)
-    a = Ticks("public", "client01").next()["flag"]
+    a = Ticks("public", "client01").next()[1]
     random.seed(1)
-    b = Ticks("public", "client01").next()["flag"]
+    b = Ticks("public", "client01").next()[1]
     assert a != b, "the flag follows the seeded generator"
 
     class _Pub:
@@ -336,9 +429,14 @@ def _flag_test():
             self.published = []
 
         async def publish(self, topic, payload, options=None):
-            self.published.append((topic, payload))
+            self.published.append((topic, payload, options))
             if self.fail:
                 raise ApplicationError("wamp.error.not_authorized")
+
+    class _Details:
+        def __init__(self, publisher="client05", topic=TICK):
+            self.publisher_authid = publisher
+            self.topic = topic
 
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "f.jsonl")
@@ -347,23 +445,58 @@ def _flag_test():
         ok_session, failing_session = _Pub(False), _Pub(True)
         asyncio.run(publish_tick(ok_session, log, ticks))
         asyncio.run(publish_tick(failing_session, log, ticks))
-
-        class _Details:
-            publisher_authid = "client05"
-
-        log.write("event", **event_fields(ok_session.published[0][1], _Details(), "application1"))
+        topic, tick, options = ok_session.published[0]
+        assert topic == TICK and options.exclude_me is False and options.acknowledge is True, options
+        log.write("event", **event_fields(TICK, (tick,), {}, _Details("client04"), "application1", ticks))
         log.close()
         with open(path) as f:
             recs = [json.loads(line) for line in f]
         pubs = [r for r in recs if r["op"] == "publish"]
         payloads = [ok_session.published[0][1], failing_session.published[0][1]]
         assert [p["ok"] for p in pubs] == [True, False], pubs
-        assert [(p["seq"], p["flag"]) for p in pubs] == [(t["seq"], t["flag"]) for t in payloads], (pubs, payloads)
-        assert ok_session.published[0][0] == TICK
+        assert [(p["seq"], digest_of(p["flag"])) for p in pubs] == [(t["seq"], t["digest"]) for t in payloads]
         (event,) = [r for r in recs if r["op"] == "event"]
-        assert "flag" not in event and "seq" not in event, event
-        assert payloads[0]["flag"] not in json.dumps(event), "the flag reached an event record"
-        assert event["ok"] and event["peer"] == "client04" and event["from_realm"] == "application1", event
+        assert "flag" not in event and pubs[0]["flag"] not in json.dumps(event), "a flag reached an event record"
+        assert event["ok"] and event["violation"] is None, event
+        want = {"topic": TICK, "peer": "client04", "from_realm": "application1", "seq": 1, "digest": tick["digest"]}
+        assert {k: event[k] for k in want} == want, event
+
+    # every violation on its case, and a genuine tick of a peer passes
+    mine = Ticks("application1", "client04")
+    own, _ = mine.next()
+    peer, _ = Ticks("application1", "client05").next()
+    other, _ = Ticks("application2", "client07").next()
+
+    def v(topic, args, kwargs=None, realm="application1"):
+        return event_fields(topic, args, kwargs or {}, _Details(), realm, mine)["violation"]
+
+    assert v(TICK, (peer,)) is None
+    assert v(PREFIX + "other", (peer,)) == "event on an unexpected topic"
+    assert v(PREFIX + "other", ()) == "event on an unexpected topic"
+    assert v(TICK, ()) == "not a tick: 0 positional and 0 keyword arguments"
+    assert v(TICK, (peer,), {"x": 1}) == "not a tick: 1 positional and 1 keyword arguments"
+    assert v(TICK, (peer, peer)) == "not a tick: 2 positional and 0 keyword arguments"
+    assert v(TICK, ("junk",)) == "not a tick: a str payload"
+    assert v(TICK, ({k: peer[k] for k in ("name", "realm", "seq")},)) == "not a tick: no digest"
+    assert v(TICK, ({**peer, "flag": "x"},)) == "not a tick: unexpected field flag"
+    assert v(TICK, ({**peer, "seq": True},)) == "not a tick: seq is not a positive integer"
+    assert v(TICK, ({**peer, "seq": 0},)) == "not a tick: seq is not a positive integer"
+    assert v(TICK, ({**peer, "name": 5},)) == "not a tick: name and realm are not strings"
+    assert v(TICK, ({**peer, "digest": peer["digest"].upper()},)) == "not a tick: digest is not 64 lower-case hex characters"
+    assert v(TICK, ({**peer, "digest": peer["digest"][:-1]},)) == "not a tick: digest is not 64 lower-case hex characters"
+    assert v(TICK, (other,)) == "tick from another realm"
+    forged = "names this client, but it did not publish this digest, or already received it"
+    assert v(TICK, ({**peer, "name": "client04"},)) == forged  # a digest this client never made
+    assert v(TICK, ({**own, "seq": own["seq"] + 1},)) == forged  # its digest, under another seq
+    assert v(TICK, (own,)) is None  # its own tick, back once
+    assert v(TICK, (own,)) == forged  # a second copy of it
+    # a received value is logged short, never as given
+    rec = event_fields(TICK, ({**peer, "name": "x" * 5000},), {}, None, "application1", mine)
+    assert rec["peer"] == "<str, 5000 long>" and rec["publisher_seen"] is None, rec
+    # the publisher keeps a bounded number of its own digests
+    small = Ticks("public", "client01", keep=3)
+    made = [small.next()[0] for _ in range(5)]
+    assert not small.received(made[0]["digest"], 1) and small.received(made[4]["digest"], 5)
 
 
 def self_test():
@@ -377,9 +510,6 @@ def self_test():
         == "router reported another caller authid"
     )
     assert check_echo(None, b"x", "client05", "client04") == "payload changed"
-    assert check_tick({"realm": "application1", "name": "client05"}, "application1") is None
-    assert check_tick({"realm": "application2", "name": "client07"}, "application1") == "tick from another realm"
-    assert check_tick("junk", "application1") == "tick from another realm"
     assert [refused_delay(n, 300) for n in range(1, 10)] == [5, 10, 20, 40, 80, 160, 300, 300, 300]
     assert [refused_delay(n, 12) for n in range(1, 4)] == [5, 10, 12]
     pace = Pace(_FakeTransport())
@@ -663,8 +793,9 @@ def main(argv=None):
     def echo(payload, details=None):
         return {"payload": payload, "callee": args.name, "caller_seen": details.caller_authid if details else None}
 
-    def on_tick(tick, details=None):
-        log.write("event", **event_fields(tick, details, args.realm))
+    def on_event(*event_args, details=None, **event_kwargs):
+        topic = details.topic if details is not None and details.topic else None
+        log.write("event", **event_fields(topic, event_args, event_kwargs, details, args.realm, ticks))
 
     async def wait_for_peers(session):
         """The barrier: wait until every peer's echo answers, so no call of the workload
@@ -771,7 +902,9 @@ def main(argv=None):
             websocket_extensions=None if ws_ext is None else [str(e) for e in ws_ext],
         )
         await session.register(echo, f"{PREFIX}{args.name}.echo", options=RegisterOptions(details_arg="details"))
-        await session.subscribe(on_tick, TICK, options=SubscribeOptions(details_arg="details"))
+        # every topic the role may use, not only the ticks: an event anywhere in the
+        # namespace is recorded, so one that no member published can be found (competitions#24)
+        await session.subscribe(on_event, PREFIX, options=SubscribeOptions(match="prefix", details_arg="details"))
         # the workload runs as its own task, so the join completes now
         state["task"] = asyncio.ensure_future(workload(session, state["left"]))
 
