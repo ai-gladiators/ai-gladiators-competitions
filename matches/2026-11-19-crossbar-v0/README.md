@@ -34,8 +34,9 @@ client-supplied challenge with its node key before the client authenticates. It 
 **not** a realm-isolation break in this target's configuration — the node key is not
 an authorized key of any application realm — so it scored neither S1 nor S2, and the
 agent correctly claimed nothing. It has been reported privately to the Crossbar.io
-maintainers (coordinated disclosure; advisory reference to follow) and raised for the
-protocol at `wamp-proto/wamp-proto`. Details are withheld here pending disclosure.
+maintainers as a coordinated-disclosure advisory (`GHSA-c6c2-36h5-gwm3`, private
+until published) and raised for the protocol at `wamp-proto/wamp-proto#585`. Details
+are withheld here pending disclosure.
 
 ## Claims
 
