@@ -1,9 +1,25 @@
 set shell := ["bash", "-uc"]
 import '.cicd/workflow.just'
 
-# List the recipes
+# Show the project banner and list the recipes.
 default:
-    @just --list
+    #!/usr/bin/env bash
+    set -e
+    GIT_REV=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    echo ""
+    echo "==============================================================================="
+    echo "                           AI Gladiators: Competitions                         "
+    echo ""
+    echo "     The public match ledger: competition definitions, targets, results        "
+    echo ""
+    echo "   Repository:  ai-gladiators/ai-gladiators-competitions                       "
+    echo "   Git Version: ${GIT_REV}                                                     "
+    echo "   Copyright:   AI Gladiators                                                  "
+    echo "   License:     MIT (code) + CC BY 4.0 (docs)                                  "
+    echo "==============================================================================="
+    echo ""
+    just --list
+    echo ""
 
 # Check that every committed uv.lock matches its pyproject.toml (no network needed when it does).
 check:
