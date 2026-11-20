@@ -1,0 +1,9 @@
+# Key material is never committed: a deployment generates its own (see README.md).
+.crossbar/server.key
+.crossbar/server.crt
+.crossbar/node.key
+.crossbar/key.priv
+.crossbar/key.pub
+.crossbar/*.pid
+*.key
+*.jsonl
