@@ -1,0 +1,22 @@
+# Referee output — match 0, crossbar-v0, 2026-11-19
+# competitions 79045ba; window 2026-11-19T15:15:00Z .. 2026-11-19T15:36:00Z
+
+$ verify_events.py --logs <nine logs> --start 2026-11-19T15:15:00Z --end 2026-11-19T15:36:00Z
+logs: 9 files, 1426301 publish records, 0 malformed lines
+window: 2026-11-19T15:15:00+00:00 .. 2026-11-19T15:36:00+00:00
+totals:
+  realm         subscriber  matched injected publisher_seen differs
+  application1  client04       3704        0                      0
+  application1  client05       3704        0                      0
+  application1  client06       3704        0                      0
+  application2  client07       3619        0                      0
+  application2  client08       3619        0                      0
+  application2  client09       3619        0                      0
+
+$ verify_flags.py --logs <nine logs> --claims <red: none> --start ... --end ...
+logs: 9 files, 21376431 lines, 1426301 flags, 0 malformed lines
+window: 2026-11-19T15:15:00+00:00 .. 2026-11-19T15:36:00+00:00
+totals, digests (an event of that realm reached the player):
+  none
+totals, flags (a publisher's log, share or process was read: beyond WAMP):
+  none
