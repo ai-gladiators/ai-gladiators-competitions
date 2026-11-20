@@ -21,6 +21,21 @@ default:
     just --list
     echo ""
 
+# Copy a competition's target + referee into ai-gladiators-briefing from its
+# allowlist manifest (competitions/<name>.instantiate.toml), with provenance; stages,
+# never commits. Land the briefing change via its own Way-A branch + review.
+#
+#   just instantiate crossbar-v0
+#   just instantiate crossbar-v0 ../ai-gladiators-briefing
+#
+# Materialize a competition's contestant-facing files into ai-gladiators-briefing (allowlist only).
+instantiate competition briefing_path="../ai-gladiators-briefing":
+    @python3 "{{justfile_directory()}}/tools/instantiate.py" "{{competition}}" --briefing "{{briefing_path}}"
+
+# Verify a briefing copy has not drifted from the recorded source (args: competition, briefing path).
+instantiate-check competition briefing_path="../ai-gladiators-briefing":
+    @python3 "{{justfile_directory()}}/tools/instantiate.py" "{{competition}}" --check --briefing "{{briefing_path}}"
+
 # Check that every committed uv.lock matches its pyproject.toml (no network needed when it does).
 check:
     #!/usr/bin/env bash
