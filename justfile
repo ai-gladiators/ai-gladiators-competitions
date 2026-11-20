@@ -66,3 +66,13 @@ smoke crossbar="crossbar" port="8080":
     venv="${UV_PROJECT_ENVIRONMENT:-${client}/.venv}"
     export PYTHON="${venv}/bin/python" CROSSBAR="{{crossbar}}" PORT="{{port}}"
     "{{justfile_directory()}}/targets/crossbar/single-node/smoke.sh"
+
+# Smoke-test the Crossbar.io single-node PubSub + RPC target (crossbar-v1): router, nine clients, a PubSub injection and an RPC rogue (args: crossbar, port; env DURATION).
+smoke-rpc crossbar="crossbar" port="8080":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    client="{{justfile_directory()}}/targets/crossbar/single-node-rpc/client"
+    uv sync --frozen --quiet --project "${client}"
+    venv="${UV_PROJECT_ENVIRONMENT:-${client}/.venv}"
+    export PYTHON="${venv}/bin/python" CROSSBAR="{{crossbar}}" PORT="{{port}}"
+    "{{justfile_directory()}}/targets/crossbar/single-node-rpc/smoke.sh"

@@ -1,0 +1,69 @@
+# What ai-gladiators-briefing receives when crossbar-v1 is instantiated.
+#
+# EXPLICIT ALLOWLIST. tools/instantiate.py copies ONLY the files named here, from
+# this repository (the source of truth) into the briefing contestant corpus.
+# Nothing outside this list is ever copied - in particular nothing from matches/,
+# no reviews, and no operator notes, and NO secrets (TLS keys, client keys and flag
+# values are generated at setup, never committed). src is a path in THIS repo; dest
+# is a path in ai-gladiators-briefing. The destination mirrors this repo's layout.
+
+# -- the competition definition -------------------------------------------------
+[[file]]
+src  = "competitions/crossbar-v1.md"
+dest = "competitions/crossbar-v1.md"
+
+# -- target: router configuration -----------------------------------------------
+[[file]]
+src  = "targets/crossbar/single-node-rpc/.crossbar/config.json"
+dest = "targets/crossbar/single-node-rpc/.crossbar/config.json"
+
+[[file]]
+src  = "targets/crossbar/single-node-rpc/README.md"
+dest = "targets/crossbar/single-node-rpc/README.md"
+
+[[file]]
+src  = "targets/crossbar/single-node-rpc/.gitignore"
+dest = "targets/crossbar/single-node-rpc/.gitignore"
+
+[[file]]
+src  = "targets/crossbar/single-node-rpc/web/index.html"
+dest = "targets/crossbar/single-node-rpc/web/index.html"
+
+# -- target: workload client ----------------------------------------------------
+[[file]]
+src  = "targets/crossbar/single-node-rpc/client/pyproject.toml"
+dest = "targets/crossbar/single-node-rpc/client/pyproject.toml"
+
+[[file]]
+src  = "targets/crossbar/single-node-rpc/client/uv.lock"
+dest = "targets/crossbar/single-node-rpc/client/uv.lock"
+
+[[file]]
+src  = "targets/crossbar/single-node-rpc/client/workload.py"
+dest = "targets/crossbar/single-node-rpc/client/workload.py"
+
+# -- target: local smoke harness (how to stand the target up) -------------------
+[[file]]
+src  = "targets/crossbar/single-node-rpc/smoke.sh"
+dest = "targets/crossbar/single-node-rpc/smoke.sh"
+
+[[file]]
+src  = "targets/crossbar/single-node-rpc/smoke_inject.py"
+dest = "targets/crossbar/single-node-rpc/smoke_inject.py"
+
+[[file]]
+src  = "targets/crossbar/single-node-rpc/smoke_rogue.py"
+dest = "targets/crossbar/single-node-rpc/smoke_rogue.py"
+
+# -- referee (how the match is scored) ------------------------------------------
+[[file]]
+src  = "targets/crossbar/single-node-rpc/referee/verify_flags.py"
+dest = "targets/crossbar/single-node-rpc/referee/verify_flags.py"
+
+[[file]]
+src  = "targets/crossbar/single-node-rpc/referee/verify_events.py"
+dest = "targets/crossbar/single-node-rpc/referee/verify_events.py"
+
+[[file]]
+src  = "targets/crossbar/single-node-rpc/referee/verify_calls.py"
+dest = "targets/crossbar/single-node-rpc/referee/verify_calls.py"
