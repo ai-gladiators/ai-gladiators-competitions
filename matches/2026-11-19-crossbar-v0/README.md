@@ -21,6 +21,10 @@ internals are omitted — nothing the referee's verdict rests on is removed.
 - **S2 (authentication / authenticity): holds.** `verify_events.py` over the same
   logs: every app-realm event was published by a member of that realm; **0 injected**
   (application1 and application2, all subscribers).
+- **S4 / S5 (availability): not assessed.** No availability referee (p99 call
+  latency / error rate) was run for Match 0 and the player attempted no denial of
+  service, so no availability verdict is claimed. The arena stayed live through the
+  window (below), which is liveness evidence, not an SLO measurement.
 
 The arena was live through the window (~3,700 app-realm events reached each member).
 The player's own report was an honest "no break"; the referee confirms it

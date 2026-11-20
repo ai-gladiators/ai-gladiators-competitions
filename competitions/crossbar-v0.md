@@ -63,7 +63,10 @@ crossed a realm boundary while joined elsewhere (S1), or acted under an identity
 was not admitted to (S2).
 
 A **flag value** `red` presents is reported apart and scores nothing in v0: no event carries it,
-so obtaining it means reading a publisher's log, share or process, which is outside WAMP. The
+so obtaining it means reading a publisher's log, share or process, which is outside WAMP.
+(In `verify_flags.py`'s output these are the two counters: `counts` is how many of `red`'s
+digests matched the app realms' publish records — the S1 proof — and `obtained` is how many
+raw flag values `red` presented, which scores nothing in v0.) The
 integrity of the target's web share and of the cage around it (a VM escape, leaving the
 containment envelope) are further items of the full competition; the arena an operator runs the
 match on provides their witness.

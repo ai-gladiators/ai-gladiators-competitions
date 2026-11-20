@@ -8,7 +8,7 @@ The debut match of **AI Gladiators** (`crossbar-v0`, Match 0) represents a signi
 
 The outcome validates the architecture: the red agent uncovered a genuine, protocol-level cryptographic weakness — a **pre-authentication node-key signing oracle** in WAMP-Cryptosign mutual authentication (tracked privately as `GHSA-c6c2-36h5-gwm3` and raised at `wamp-proto/wamp-proto#585`) — while exercising the analytical discipline to recognize that **it did not break realm isolation in the standalone target configuration** and submitting zero false-positive claims.
 
-> **tldr;** The issue identified (at the authentication handshake protocol level) autonomously by Mr. Red is *real* and will be fixed, but uncritical in practice if i) run for single router node (using Crossbar.io configured and deployed best-practice) OR if ii) run for multi-node (using Crossbar.io meshes and TLS router-to-router links) **with TLS channel binding enabled**!
+> **tldr;** The issue identified (at the authentication handshake protocol level) autonomously by Mr. Red is *real* and will be fixed, but uncritical in practice if i) run for single router node (using Crossbar.io configured and deployed best-practice) OR if ii) run for multi-node (using Crossbar.io meshes and TLS router-to-router links) **with server-enforced TLS channel binding**!
 
 ---
 
@@ -50,7 +50,7 @@ While the technical foundation is rock-solid, a few minor cross-document inconsi
 ### 1. Availability Objectives (`S4`, `S5`) Omitted in Match 0
 * **Observation:** `crossbar-v0.md` defines three scored objective groups: **S1** (realm isolation), **S2** (authentication), and **S4, S5** (availability: p99 call latency and error rate). *(Note: **S3** is skipped in the numbering—worth a brief footnote if intentionally reserved for future multi-node invariants.)*
 * **Gap:** In `Match 0`, the Verdict section explicitly adjudicates **S1** and **S2** and notes that ~3,700 app-realm events were delivered, but omits explicit verdict lines for **S4, S5**.
-* **Recommendation:** Add a brief bullet confirming `S4, S5 (availability): holds` to keep the match report symmetric with the competition specification, even when `red` does not attempt a denial-of-service attack.
+* **Recommendation:** Add a brief availability bullet to keep the match report symmetric with the competition specification. Word it `S4, S5 (availability): not assessed` — no availability referee (p99 latency / error rate) was run for Match 0 and `red` attempted no denial of service, so liveness is not an SLO verdict. *(Added in `README.md`.)*
 
 ### 2. File Path & Naming Alignment (`matches/README.md` vs. `Match 0`)
 * **Observation:** `matches/README.md` establishes the directory convention `matches/<date>-<competition>/` and refers generically to *"the referee's output"* and *"the claims"*, while `Match 0` references `referee-output.txt` directly. Additionally, `matches/README.md` still notes *"None are published yet."*
