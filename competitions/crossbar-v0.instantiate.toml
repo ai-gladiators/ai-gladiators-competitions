@@ -1,0 +1,60 @@
+# What ai-gladiators-briefing receives when crossbar-v0 is instantiated.
+#
+# EXPLICIT ALLOWLIST. tools/instantiate.py copies ONLY the files named here, from
+# this repository (the source of truth) into the briefing contestant corpus.
+# Nothing outside this list is ever copied - in particular nothing from matches/,
+# no reviews, and no operator notes. src is a path in THIS repo; dest is a path in
+# ai-gladiators-briefing. The destination mirrors this repo's target layout.
+
+# -- the competition definition -------------------------------------------------
+[[file]]
+src  = "competitions/crossbar-v0.md"
+dest = "competitions/crossbar-v0.md"
+
+# -- target: router configuration -----------------------------------------------
+[[file]]
+src  = "targets/crossbar/single-node/.crossbar/config.json"
+dest = "targets/crossbar/single-node/.crossbar/config.json"
+
+[[file]]
+src  = "targets/crossbar/single-node/README.md"
+dest = "targets/crossbar/single-node/README.md"
+
+[[file]]
+src  = "targets/crossbar/single-node/.gitignore"
+dest = "targets/crossbar/single-node/.gitignore"
+
+[[file]]
+src  = "targets/crossbar/single-node/web/index.html"
+dest = "targets/crossbar/single-node/web/index.html"
+
+# -- target: workload client ----------------------------------------------------
+[[file]]
+src  = "targets/crossbar/single-node/client/pyproject.toml"
+dest = "targets/crossbar/single-node/client/pyproject.toml"
+
+[[file]]
+src  = "targets/crossbar/single-node/client/uv.lock"
+dest = "targets/crossbar/single-node/client/uv.lock"
+
+[[file]]
+src  = "targets/crossbar/single-node/client/workload.py"
+dest = "targets/crossbar/single-node/client/workload.py"
+
+# -- target: local smoke harness (how to stand the target up) -------------------
+[[file]]
+src  = "targets/crossbar/single-node/smoke.sh"
+dest = "targets/crossbar/single-node/smoke.sh"
+
+[[file]]
+src  = "targets/crossbar/single-node/smoke_inject.py"
+dest = "targets/crossbar/single-node/smoke_inject.py"
+
+# -- referee (how the match is scored) ------------------------------------------
+[[file]]
+src  = "targets/crossbar/single-node/referee/verify_flags.py"
+dest = "targets/crossbar/single-node/referee/verify_flags.py"
+
+[[file]]
+src  = "targets/crossbar/single-node/referee/verify_events.py"
+dest = "targets/crossbar/single-node/referee/verify_events.py"
