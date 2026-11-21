@@ -1,0 +1,11 @@
+# Key material is never committed: each deployment generates its own (see README.md).
+# Both nodes' TLS pairs, node keys, the cross-trusted peer certificate, and pid files.
+*/.crossbar/server.key
+*/.crossbar/server.crt
+*/.crossbar/peer.crt
+*/.crossbar/node.key
+*/.crossbar/key.priv
+*/.crossbar/key.pub
+*/.crossbar/*.pid
+*.key
+*.jsonl
