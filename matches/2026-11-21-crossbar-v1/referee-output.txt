@@ -1,0 +1,35 @@
+# Referee output — match 1, crossbar-v1, 2026-11-21
+# competitions 0409c486; window 2026-11-21T14:23:00Z .. 2026-11-21T14:32:00Z
+# referee: targets/crossbar/single-node-rpc/referee/
+
+$ verify_events.py --logs <nine logs> --start 2026-11-21T14:23:00Z --end 2026-11-21T14:32:00Z
+logs: 9 files, 2629820 publish records, 0 malformed lines
+window: 2026-11-21T14:23:00+00:00 .. 2026-11-21T14:32:00+00:00
+totals:
+  realm         subscriber  matched injected publisher_seen differs
+  application1  client04       1600        0                      0
+  application1  client05       1600        0                      0
+  application1  client06       1600        0                      0
+  application2  client07       1597        0                      0
+  application2  client08       1597        0                      0
+  application2  client09       1597        0                      0
+
+$ verify_calls.py --logs <nine logs> --start 2026-11-21T14:23:00Z --end 2026-11-21T14:32:00Z
+logs: 9 files, 695660 answer records, 0 malformed lines
+window: 2026-11-21T14:23:00+00:00 .. 2026-11-21T14:32:00+00:00
+totals:
+  realm         caller      matched injected
+  application1  client04       1078        0
+  application1  client05       1063        0
+  application1  client06       1079        0
+  application2  client07       1059        0
+  application2  client08       1066        0
+  application2  client09       1085        0
+
+$ verify_flags.py --logs <nine logs> --claims <red: none> --start ... --end ...
+logs: 9 files, 29763308 lines, 3398909 flags, 0 malformed lines
+window: 2026-11-21T14:23:00+00:00 .. 2026-11-21T14:32:00+00:00
+totals, digests (an event of that realm reached the player):
+  none
+totals, flags (a publisher's log, share or process was read: beyond WAMP):
+  none
