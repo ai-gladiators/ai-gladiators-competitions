@@ -18,9 +18,45 @@ description = "The workload client of the Crossbar.io two-node mesh target"
 requires-python = "==3.14.*"
 dependencies = [
     # asyncio, CBOR, WAMP-Cryptosign (PyNaCl)
-    "autobahn[asyncio,encryption,serialization]==26.11.1",
+    "autobahn[asyncio,encryption,serialization]==26.10.2",
 ]
 
 [tool.uv]
 # A script and its dependencies, not a package to build or install.
 package = false
+
+# The arena clients (and crossbar_env on the nodes) run on CPython only; narrowing the
+# lock to CPython keeps it consistent with the shared level (no PyPy split).
+environments = ["platform_python_implementation == 'CPython'"]
+
+# Pinned to crossbar_env's concrete closure (crossbar v26.10.1 / autobahn 26.10.2): every arena
+# VM shares one /opt/crossbar/venv, so the workload image refuses a client lock that moves any
+# package of that shared level. Regenerate from the level's freeze when crossbar_env is bumped.
+# (ai-gladiators-competitions / collection#373.)
+constraint-dependencies = [
+    "attrs==25.4.0",
+    "autobahn==26.10.2",
+    "base58==2.1.1",
+    "bjdata==0.6.6",
+    "cbor2==6.1.5",
+    "cffi==2.0.0",
+    "colorama==0.4.6",
+    "cryptography==50.0.2",
+    "ecdsa==0.19.1",
+    "hyperlink==21.0.0",
+    "idna==2.5",
+    "msgpack==1.1.2",
+    "numpy==2.3.5",
+    "pyasn1-modules==0.4.2",
+    "pyasn1==0.6.1",
+    "pycparser==2.23",
+    "pynacl==1.6.1",
+    "pyopenssl==26.4.0",
+    "pytrie==0.4.0",
+    "qrcode==8.2",
+    "service-identity==24.2.0",
+    "six==1.17.0",
+    "sortedcontainers==2.4.0",
+    "txaio==26.6.1",
+    "ujson==5.11.0",
+]
